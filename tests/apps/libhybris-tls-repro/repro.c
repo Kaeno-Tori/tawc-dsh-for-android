@@ -296,6 +296,24 @@ static int assert_weak_tlsdesc_refused(const char* weak_so_path) {
     return 0;
 }
 
+/* Regression test for the BoringSSL FIPS workaround in linker.cpp
+ * (hybris_neuter_boringssl_integrity_test). Android's libcrypto.so
+ * HMACs its own text in a constructor; the TLS patcher rewrites every
+ * `mrs xN, tpidr_el0` in that text, so without the workaround the load
+ * aborts with "FIPS integrity test failed" (exit 134). */
+static int assert_libcrypto_loads(void) {
+    const char* path = "/system/lib64/libcrypto.so";
+    fprintf(stderr, "[probe3] hybris_dlopen(%s) ...\n", path);
+    void* h = hybris_dlopen(path, 2 /* RTLD_NOW */);
+    if (h == NULL) {
+        fprintf(stderr, "[probe3] FAIL: hybris_dlopen failed: %s\n", hybris_dlerror());
+        return 1;
+    }
+    hybris_dlclose(h);
+    fprintf(stderr, "[probe3] OK: libcrypto FIPS check survived\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <path-to-bionic-tls-lib.so>\n", argv[0]);
@@ -366,6 +384,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[repro] === loud-error guard checks ===\n");
     if (assert_dlsym_tls_refused(h)) return 1;
     if (assert_weak_tlsdesc_refused("./weak_lib.so")) return 1;
+    if (assert_libcrypto_loads()) return 1;
     fprintf(stderr, "[repro] === guard checks OK ===\n");
 
     fprintf(stderr, "[repro] hybris_dlclose...\n");

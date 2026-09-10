@@ -143,6 +143,13 @@ fn test_libhybris_tls_dlclose_does_not_abort() {
          stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
+        stderr.contains("libcrypto FIPS check survived"),
+        "libhybris-tls-repro exited 0 but never loaded Android libcrypto. \
+         An abort with `FIPS integrity test failed` means the BoringSSL \
+         workaround in the libhybris linker (hybris_neuter_boringssl_integrity_test) \
+         has regressed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
         stderr.contains("guard checks OK"),
         "libhybris-tls-repro exited 0 but the loud-error guards on dlsym(TLS) \
          and weak TLSDESC didn't pass. A regression here means the linker has \
