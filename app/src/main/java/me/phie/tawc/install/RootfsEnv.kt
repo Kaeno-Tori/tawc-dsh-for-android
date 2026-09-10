@@ -4,7 +4,7 @@ import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
 
 /**
- * Environment variables passed to the in-rootfs `bash -lc` shell.
+ * Environment variables passed to the in-rootfs login shell.
  *
  * Each install method's [InstallationMethod.startInside] spawns the
  * shell under `/usr/bin/env -i` so nothing Android (or proot/tawcroot)
@@ -48,7 +48,14 @@ internal object RootfsEnv {
     fun build(method: Method): Map<String, String> =
         build(method, Settings.graphicsBackend)
 
-    fun build(method: Method, backend: GraphicsBackend): Map<String, String> = buildMap {
+    /** [shell] is root's login shell ([RootShell.resolve]); it only
+     *  becomes `SHELL` in the guest env — the argv every spawn execs
+     *  is chosen by the caller. */
+    fun build(
+        method: Method,
+        backend: GraphicsBackend,
+        shell: String = RootShell.DEFAULT,
+    ): Map<String, String> = buildMap {
         put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games")
         put("HOME", GUEST_HOME)
         // login(1) normally sets USER/LOGNAME; we exec bash directly,
@@ -56,6 +63,11 @@ internal object RootfsEnv {
         // PROMPT_COMMANDs) would otherwise see them empty.
         put("USER", "root")
         put("LOGNAME", "root")
+        // Also normally login(1)'s job. Bash would fill it in from
+        // passwd on its own, but non-bash shells and plain `-c`
+        // spawns wouldn't, and GUI terminals launched from the
+        // desktop read it to pick which shell to open.
+        put("SHELL", shell)
         put("TMPDIR", "/tmp")
         // Wayland socket is exposed inside the rootfs at /usr/share/tawc/
         // via the per-method bind of the host's <appData>/share/ dir
@@ -180,13 +192,17 @@ internal object RootfsEnv {
      */
     fun envArgv(method: Method): List<String> = envArgv(method, Settings.graphicsBackend)
 
-    fun envArgv(method: Method, backend: GraphicsBackend): List<String> {
+    fun envArgv(
+        method: Method,
+        backend: GraphicsBackend,
+        shell: String = RootShell.DEFAULT,
+    ): List<String> {
         val out = ArrayList<String>(4 + 16)
         out += "/usr/bin/env"
         out += "-i"
         out += "-C"
         out += "/root"
-        for ((k, v) in build(method, backend)) out += "$k=$v"
+        for ((k, v) in build(method, backend, shell)) out += "$k=$v"
         return out
     }
 }

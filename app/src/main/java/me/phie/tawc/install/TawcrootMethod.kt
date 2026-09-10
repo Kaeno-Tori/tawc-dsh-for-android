@@ -113,8 +113,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
         val argv = buildList {
             add("/system/bin/setsid")
-            addAll(rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir))
-            add("/bin/bash")
+            addAll(rootfsArgv(
+                rootfs, graphics, assetBinds, externalBinds, andoHostDir,
+                RootShell.resolve(File(rootfs)),
+            ))
+            add(RootShell.DEFAULT)
             if (command != null) {
                 add("-lc"); add(command)
             } else {
@@ -155,6 +158,13 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * [command] == null runs an interactive login shell (`-l`); else the
      * shell runs `-lc <command>` — still a login shell so profile env
      * fires, matching [startInside].
+     *
+     * Interactive tabs exec root's passwd shell ([RootShell.resolve]),
+     * so `chsh` inside the rootfs takes effect; `-l` is accepted by
+     * bash/zsh/fish/dash/ksh alike. Command sessions stay on bash: the
+     * Exec line, the caller's hold-open trailer and the profile
+     * scripts all assume POSIX-or-better shell syntax that fish
+     * doesn't speak.
      */
     fun ptyShellExec(
         rootfs: String,
@@ -165,14 +175,16 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         val assetBinds = assetBinds()
         val andoHostDir = store.andoHostDir(rootfs)
         val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
+        val shell = RootShell.resolve(File(rootfs))
         val argv = buildList {
-            addAll(rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir))
+            addAll(rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir, shell))
             add("TERM=xterm-256color")
             add("COLORTERM=truecolor")
-            add("/bin/bash")
             if (command != null) {
+                add(RootShell.DEFAULT)
                 add("-lc"); add(command)
             } else {
+                add(shell)
                 add("-l")
             }
         }
@@ -233,13 +245,16 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     /** `<tawcroot> -r <rootfs> -b … -- /usr/bin/env -i -C /root K=V …`
      * — the shared spawn prefix up to (and including) the rootfs env;
-     * callers append the program to run. */
+     * callers append the program to run. `SHELL` in that env is root's
+     * passwd shell even on the bash-only command paths, so scripts and
+     * desktop-launched terminals see the shell the user chose. */
     private fun rootfsArgv(
         rootfs: String,
         graphics: GraphicsBackend?,
         assetBinds: List<BindSpec>,
         externalBinds: List<ExternalBind>,
         andoHostDir: String?,
+        shell: String,
     ): List<String> = buildList {
         add(tawcrootBin)
         addAll(listOf("-r", rootfs))
@@ -247,7 +262,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             addAll(listOf("-b", spec.arg()))
         }
         add("--")
-        addAll(RootfsEnv.envArgv(RootfsEnv.Method.TAWCROOT, graphics ?: Settings.graphicsBackend))
+        addAll(RootfsEnv.envArgv(
+            RootfsEnv.Method.TAWCROOT,
+            graphics ?: Settings.graphicsBackend,
+            shell,
+        ))
     }
 
     /**

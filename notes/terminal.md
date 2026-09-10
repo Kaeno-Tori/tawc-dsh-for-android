@@ -22,8 +22,8 @@ configuration):
 
 Both modules are **Apache-2.0** (the explicit exception in termux-app's
 `LICENSE.md`; they descend from jackpal's Android-Terminal-Emulator).
-Termux packages/bootstrap are not involved at all; the shell is the
-distro's own `/bin/bash`.
+Termux packages/bootstrap are not involved at all; the shell is one
+the distro itself ships (see "Spawn path").
 
 The extra-keys row (ESC/TAB/CTRL/arrows above the IME) is termux's
 `ExtraKeysView` + `TerminalExtraKeys`, cherry-picked from the
@@ -53,13 +53,43 @@ Works on current Android; termux and UserLAnd ship the same code.
 ## Spawn path
 
 `TawcrootMethod.ptyShellExec` builds the same tawcroot envelope as
-`startInside` (binds, `env -i` rootfs env, `bash -l`) minus the
+`startInside` (binds, `env -i` rootfs env, `<shell> -l`) minus the
 `setsid` prefix — the termux JNI setsid()s the child itself, which
-keeps the rootfs-session invariant (rootfs-sessions.md) and makes bash
-the session leader of the pty, so job control/readline/curses work
-(unlike the pipe-fed `RunCommandOp`/exec-broker paths). `TERM`/
+keeps the rootfs-session invariant (rootfs-sessions.md) and makes the
+shell the session leader of the pty, so job control/readline/curses
+work (unlike the pipe-fed `RunCommandOp`/exec-broker paths). `TERM`/
 `COLORTERM` are appended after the shared `RootfsEnv` map, which the
 non-tty paths don't want.
+
+Which shell: `RootShell.resolve` reads field 7 of the first `root`
+line of `<rootfs>/etc/passwd`, so `chsh -s /usr/bin/zsh` inside the
+rootfs is honoured (wmww/tawc#7). The rootfs is app-uid-owned under
+tawcroot, so that's a plain host-side read; symlinks are followed
+*within* the rootfs (an absolute `/usr/bin/zsh -> /usr/bin/zsh-5.9`
+must not be read against the host's `/`). It falls back to `/bin/bash`
+whenever the answer isn't usable — no passwd file or `root` line,
+empty field, or a shell that isn't an existing executable in the
+rootfs (`chsh` to a since-uninstalled shell). `-l` is accepted by
+bash, zsh, fish, dash and ksh alike. There is deliberately no app-side
+shell setting: `chsh` already expresses it.
+
+Only interactive tabs switch shells. Every command spawn — command
+sessions below, launcher Exec lines, install steps, `RunCommandOp`,
+the exec broker, `rootfs-run.sh` — stays on `/bin/bash -lc`, because
+Exec lines, the hold-open trailer and the install scripts all assume
+POSIX-or-better syntax that fish doesn't speak. `SHELL` in the
+`RootfsEnv` map *is* the resolved shell on every tawcroot spawn, so
+scripts and GUI terminals launched from the desktop open the same one.
+
+`ShellDefaults`' prompt and cwd tab title are bash-only (they live in
+`/root/.bashrc` + `/usr/lib/tawc/bashrc`), so a zsh/fish tab gets that
+distro's own prompt and — with no OSC title arriving — a `Term <n>`
+label. Configuring a non-bash prompt is the user's job. A shell that
+exists but dies on startup takes every new tab with it and leaves no
+in-app way back; recovery is `scripts/rootfs-run.sh 'usermod -s
+/bin/bash root'` from a dev box, or reinstalling the distro (`chsh`
+itself PAM-prompts once root's current shell isn't in `/etc/shells`,
+so it can't undo a `chsh` to a bogus path).
 
 tawcroot-only: chroot spawns via `su` (no pty fd to hand over) and
 proot is dev-only, so the button is gated on
