@@ -40,3 +40,12 @@
  * from it — pin the userspace-visible shape, arch-correct via
  * O_DIRECTORY. */
 #define TAWC_O_TMPFILE (020000000 | O_DIRECTORY)
+
+/* Rebuild st_dev from statx's split major/minor (the kernel's
+ * new_encode_dev layout, which newfstatat's st_dev uses on both our
+ * arches), so statx and stat callers can compare or synthesize the
+ * same device number. */
+#define TAWC_MKDEV(maj, min)                                              \
+	(((unsigned long)((min) & 0xffu)) |                               \
+	 ((unsigned long)(maj) << 8) |                                    \
+	 ((unsigned long)((min) & ~0xffu) << 12))

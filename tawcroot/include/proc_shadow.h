@@ -4,8 +4,11 @@
  * may open them — either because the kernel's content leaks host paths
  * the guest's world view doesn't contain (/proc/self/maps), or because
  * Android's sandbox makes the real file unreadable in a way guests
- * mishandle (/proc/sys/kernel/overflow{uid,gid}, /proc/bus/pci/devices).
- * See the comments on each synthesizer for the per-file story.
+ * mishandle (/proc/sys/kernel/overflow{uid,gid}, /proc/bus/pci/devices,
+ * /proc/stat, /proc/version, /proc/uptime, /proc/loadavg). See the
+ * comments on each synthesizer for the per-file story. Shadows cover
+ * metadata too — stat/statx/access are synthesized from the same
+ * classifier, not passed to the (denied) real inode.
  *
  * Everything here is async-signal-safe (raw syscalls, no allocation
  * outside anonymous mmaps that are unmapped before return).
@@ -15,12 +18,45 @@
 
 #include <stddef.h>
 
-/* Classify `path` against the shadowed /proc files and synthesize the
- * matching fd. Returns 1 on a hit (with *out set to the new fd or the
- * synthesizer's -errno) and 0 on no match. Centralising the dispatch
- * keeps the absolute-path and fd-relative open branches in lockstep —
- * a future shadow only needs one line added here. */
-int tawcroot_proc_shadow_open(const char *path, long *out);
+struct stat;
+struct statx;
+
+/* Which shadowed /proc file `path` names, if any.
+ *
+ * ONE classifier feeds all four surfaces below (open, stat, statx,
+ * access). Metadata calls used to translate the path and hand it to the
+ * kernel, so `cat /proc/stat` read a synthesized file while
+ * `stat /proc/stat` hit the real, SELinux-denied inode. A path that
+ * stats fine but fails to open is a worse lie than one that fails both
+ * ways, so the surfaces must never drift: a new shadow is one enum
+ * value, one `open` case and one `content` case, and
+ * hosted_proc_shadow_open_stat_lockstep fails CI if only one lands. */
+#define TAWCROOT_PROC_SHADOW_NONE        0
+#define TAWCROOT_PROC_SHADOW_MAPS        1  /* /proc/<own>/maps */
+#define TAWCROOT_PROC_SHADOW_OVERFLOWUID 2  /* /proc/sys/kernel/overflowuid */
+#define TAWCROOT_PROC_SHADOW_OVERFLOWGID 3  /* ...overflowgid */
+#define TAWCROOT_PROC_SHADOW_PCI_DEVICES 4  /* /proc/bus/pci/devices */
+#define TAWCROOT_PROC_SHADOW_STAT        5  /* /proc/stat */
+#define TAWCROOT_PROC_SHADOW_VERSION     6  /* /proc/version */
+#define TAWCROOT_PROC_SHADOW_UPTIME      7  /* /proc/uptime */
+#define TAWCROOT_PROC_SHADOW_LOADAVG     8  /* /proc/loadavg */
+#define TAWCROOT_PROC_SHADOW_KIND_MAX    8
+int tawcroot_proc_shadow_classify(const char *path);
+
+/* Synthesize the shadow fd for a classified kind. Returns the new fd or
+ * a synthesizer -errno; TAWCROOT_PROC_SHADOW_NONE is a caller bug and
+ * answers -EINVAL. */
+long tawcroot_proc_shadow_open(int kind);
+
+/* Metadata surfaces for a classified kind. `stat`/`statx` describe a
+ * procfs regular file (0444, root-owned, size 0) WITHOUT building the
+ * memfd — synthesizing content on every stat would re-read and rewrite
+ * the whole maps file for an `ls -l /proc/self`. `access` answers 0 for
+ * F_OK/R_OK and -EACCES for any W_OK/X_OK bit. */
+long tawcroot_proc_shadow_stat(int kind, struct stat *out);
+long tawcroot_proc_shadow_statx(int kind, unsigned int mask,
+				struct statx *out);
+long tawcroot_proc_shadow_access(int kind, int mode);
 
 /* One-pass classification of the /proc magic links the readlink
  * handler synthesizes or post-processes. Strips the /proc/<pid> prefix
@@ -94,9 +130,9 @@ size_t tawcroot_proc_magic_link_prefix(const char *suf);
 #define TAWCROOT_PROC_MAGIC_CONTAIN   3
 size_t tawcroot_proc_magic_link_classify(const char *suf, int *kind);
 
-/* Fast-out for fd-relative opens: can this relative leaf even compose
- * into a /proc path we shadow? Cheap first-byte test that skips the
- * readlinkat for the vast majority of fd-relative opens. */
+/* Fast-out for fd-relative accesses: can this relative leaf even
+ * compose into a /proc path we shadow? Cheap first-byte test that skips
+ * the readlinkat for the vast majority of fd-relative opens and stats. */
 int tawcroot_could_be_proc_relative(const char *p);
 
 /* Compose `dirfd`'s host path (via /proc/self/fd/<n>) with a relative

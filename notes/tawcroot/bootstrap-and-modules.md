@@ -127,7 +127,7 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── path_resolve.h  # symlink walker — operates against an oracle
 │   ├── path_scratch.h  # handler-safe PATH_MAX scratch-buffer pool
 │   ├── proc_rewrite.h  # /proc/self/maps reverse-translation — pure
-│   ├── proc_shadow.h   # /proc shadow-fd synthesis + /proc/self classify
+│   ├── proc_shadow.h   # /proc shadow fd+metadata synthesis, /proc/self classify
 │   ├── raw_sys.h       # tawc_<syscall> wrappers
 │   ├── shm.h           # /dev/shm emulation (memfd-backed name table)
 │   ├── signal_shadow.h # guest SIGSYS sigaction/sigmask virtualization
@@ -159,7 +159,7 @@ tawcroot/                            # everything tawcroot-specific lives here
 │   ├── path_resolve.c  # symlink walker — pure, oracle-driven
 │   ├── path_scratch.c  # scratch-buffer pool (CAS acquire/release)
 │   ├── proc_rewrite.c  # /proc/self/maps line rewriter — pure
-│   ├── proc_shadow.c   # /proc shadow memfds (maps/overflow/pci) + classify
+│   ├── proc_shadow.c   # /proc shadow memfds + stat/statx/access, one classifier
 │   ├── shm.c           # /dev/shm emulation
 │   ├── signal_shadow.c # SIGSYS sigaction/sigmask shadow state
 │   ├── supervisor.c    # shared bootstrap: rootfs fd, binds, handler, masks

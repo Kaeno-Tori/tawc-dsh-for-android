@@ -67,6 +67,31 @@ static int classify_shm(const char *local_path, const char **name_out)
 	return SHM_PEEK_NONE;
 }
 
+/* Classify an already-fetched guest path as a /proc shadow, retrying
+ * through fd-relative composition when the absolute form missed —
+ * without it, fstatat(proc_dirfd, "version", ...) still reaches the
+ * denied inode. `path` is the fetched copy (scratch->buf[0]); the
+ * composed form lands in scratch->buf[2], untouched by translate_local
+ * (which uses slots 0 and 1). Returns a TAWCROOT_PROC_SHADOW_* kind.
+ *
+ * One helper, four call sites (openat + the three metadata handlers),
+ * so the open and metadata surfaces cannot drift on the fd-relative
+ * form the way they once drifted on the absolute one. */
+static int proc_shadow_classify_at(struct tawcroot_path_scratch *scratch,
+				   int dirfd, const char *path)
+{
+	int kind = tawcroot_proc_shadow_classify(path);
+	if (kind != TAWCROOT_PROC_SHADOW_NONE) return kind;
+	if (dirfd == AT_FDCWD || path[0] == '/' ||
+	    !tawcroot_could_be_proc_relative(path))
+		return TAWCROOT_PROC_SHADOW_NONE;
+	char *composed = scratch->buf[2];
+	if (tawcroot_compose_fd_relative(dirfd, path, composed,
+					 TAWCROOT_PATH_SCRATCH_SIZE) <= 0)
+		return TAWCROOT_PROC_SHADOW_NONE;
+	return tawcroot_proc_shadow_classify(composed);
+}
+
 /* Fetch the guest path once into scratch->buf[slot] for a handler that
  * classifies intercepts before translating. Returns 0 / -errno. */
 static long fetch_guest_path(struct tawcroot_path_scratch *scratch, int slot,
@@ -236,6 +261,11 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * fallback. See notes/tawcroot/path-translation.md "More /proc reverse-translation
 	 * paths" for the wider context.
 	 *
+	 * /proc/stat, /proc/version, /proc/uptime, /proc/loadavg: same
+	 * SELinux story, different casualties — procps needs `btime`,
+	 * LibreOffice's oosplash hard-exits when /proc/version is missing,
+	 * `uptime`/`w`/`top` want the other two. See the synthesizers.
+	 *
 	 * /proc/bus/pci/devices: synthesize an empty memfd. Android exposes
 	 * the file as an unreadable placeholder (`-?????????`); opening it
 	 * returns EACCES. libpci's procfs back-end calls its default
@@ -253,26 +283,16 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * combos fall through to normal translation so the kernel produces
 	 * the conventional -ENOTDIR / O_PATH-fd behavior.
 	 *
-	 * Fd-relative form: openat(proc_dir_fd, "self/maps", ...) or
-	 * openat(proc_dir_fd, "sys/kernel/overflowuid", ...). We resolve
-	 * dirfd via /proc/self/fd/<n>, join with the guest path, and
-	 * re-classify. One extra readlinkat per non-AT_FDCWD relative
-	 * O_RDONLY-ish open; only fires when the absolute peek didn't match. */
+	 * Fd-relative form (proc_shadow_classify_at): openat(proc_dir_fd,
+	 * "self/maps", ...) or openat(proc_dir_fd, "sys/kernel/overflowuid",
+	 * ...). One extra readlinkat per non-AT_FDCWD relative O_RDONLY-ish
+	 * open; only fires when the absolute classify didn't match. */
 	if ((flags & O_ACCMODE) == O_RDONLY &&
 	    (flags & O_DIRECTORY) == 0 &&
 	    (flags & O_PATH) == 0) {
-		long shadow;
-		int hit = tawcroot_proc_shadow_open(path, &shadow);
-		if (!hit && dirfd != AT_FDCWD && path[0] != '/' &&
-		    tawcroot_could_be_proc_relative(path)) {
-			char *composed = scratch->buf[2];
-			if (tawcroot_compose_fd_relative(dirfd, path,
-						composed,
-						TAWCROOT_PATH_SCRATCH_SIZE) > 0)
-				hit = tawcroot_proc_shadow_open(composed,
-								&shadow);
-		}
-		if (hit) {
+		int kind = proc_shadow_classify_at(scratch, dirfd, path);
+		if (kind != TAWCROOT_PROC_SHADOW_NONE) {
+			long shadow = tawcroot_proc_shadow_open(kind);
 			/* The shadow memfds are created MFD_CLOEXEC.
 			 * If the guest didn't ask for O_CLOEXEC, clear
 			 * FD_CLOEXEC so the fd survives the guest's next
@@ -457,14 +477,6 @@ static void stat_fix_nlink_in_store(int fd, const char *path,
  * live elsewhere — skips /system binds, memfds) while a store is open
  * pays one /proc/self/fd readlink; the sidecar read happens on actual
  * store hits only. Returns the count, or 0 for "not an object". */
-/* Rebuild st_dev from statx's split major/minor (the kernel's
- * new_encode_dev layout, which newfstatat's st_dev uses on both our
- * arches) so statx callers can compare against tawcroot_store_dev. */
-#define TAWC_MKDEV(maj, min)                                              \
-	(((unsigned long)((min) & 0xffu)) |                               \
-	 ((unsigned long)(maj) << 8) |                                    \
-	 ((unsigned long)((min) & ~0xffu) << 12))
-
 static unsigned long fd_object_nlink(int fd, unsigned int mode,
 				     unsigned long nlink, unsigned long dev)
 {
@@ -563,6 +575,22 @@ static long handle_newfstatat(const tawcroot_syscall_args *args,
 			long ce = tawc_copy_to_guest(out, &local, sizeof local);
 			if (ce < 0) return ce;
 			return 0;
+		}
+	}
+
+	/* /proc shadows. Without this the path would be translated and
+	 * handed to the kernel, hitting the real (SELinux-denied) inode —
+	 * so /proc/stat read fine but stat'ed EACCES, and LibreOffice,
+	 * which only ever STATS /proc/version, never started. Flags don't
+	 * matter: every shadowed path is a regular file, so
+	 * AT_SYMLINK_NOFOLLOW makes no difference. */
+	{
+		int kind = proc_shadow_classify_at(scratch, dirfd,
+						   scratch->buf[0]);
+		if (kind != TAWCROOT_PROC_SHADOW_NONE) {
+			long r = tawcroot_proc_shadow_stat(kind, &local);
+			if (r < 0) return r;
+			return finish_stat(0, &local, out);
 		}
 	}
 
@@ -979,6 +1007,16 @@ static long handle_faccessat(const tawcroot_syscall_args *args, ucontext_t *uc)
 		int kind = classify_shm(scratch->buf[0], &shm_name);
 		if (kind == SHM_PEEK_NAME) return tawcroot_shm_access_name(shm_name);
 		if (kind == SHM_PEEK_DIR)  return tawcroot_shm_access_dir();
+	}
+
+	/* /proc shadows — see the same block in handle_newfstatat. The
+	 * shadows are 0444 regular files, so R_OK/F_OK pass and any
+	 * W_OK/X_OK bit is EACCES. */
+	{
+		int kind = proc_shadow_classify_at(scratch, dirfd,
+						   scratch->buf[0]);
+		if (kind != TAWCROOT_PROC_SHADOW_NONE)
+			return tawcroot_proc_shadow_access(kind, mode);
 	}
 
 	/* W_OK probes declare write intent: the kernel answers EROFS for
@@ -1645,6 +1683,18 @@ static long handle_statx(const tawcroot_syscall_args *args, ucontext_t *uc)
 			long ce = tawc_copy_to_guest(out, &local, sizeof local);
 			if (ce < 0) return ce;
 			return 0;
+		}
+	}
+
+	/* /proc shadows — see the same block in handle_newfstatat. */
+	{
+		int kind = proc_shadow_classify_at(scratch, dirfd,
+						   scratch->buf[0]);
+		if (kind != TAWCROOT_PROC_SHADOW_NONE) {
+			long r = tawcroot_proc_shadow_statx(kind, mask,
+							    &local);
+			if (r < 0) return r;
+			return finish_statx(0, &local, out);
 		}
 	}
 

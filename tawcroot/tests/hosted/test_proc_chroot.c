@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -106,6 +107,216 @@ test(hosted_proc_overflowuid_shadow_content)
 	test_int_eq(read((int)gfd, buf, sizeof buf - 1), 6);
 	test_str_eq(buf, "65534\n");
 	test_int_eq(close((int)gfd), 0);
+
+	th_teardown(&v);
+}
+
+/* --- shadow metadata: stat / statx / access ----------------------------- */
+
+/* Every shadowed absolute path, with the kind it must classify to. The
+ * lockstep test below asserts this covers every kind the classifier
+ * knows, so adding a shadow to one surface only fails CI. */
+static const struct { const char *path; int kind; } shadow_paths[] = {
+	{ "/proc/self/maps",                 TAWCROOT_PROC_SHADOW_MAPS },
+	{ "/proc/sys/kernel/overflowuid",    TAWCROOT_PROC_SHADOW_OVERFLOWUID },
+	{ "/proc/sys/kernel/overflowgid",    TAWCROOT_PROC_SHADOW_OVERFLOWGID },
+	{ "/proc/bus/pci/devices",           TAWCROOT_PROC_SHADOW_PCI_DEVICES },
+	{ "/proc/stat",                      TAWCROOT_PROC_SHADOW_STAT },
+	{ "/proc/version",                   TAWCROOT_PROC_SHADOW_VERSION },
+	{ "/proc/uptime",                    TAWCROOT_PROC_SHADOW_UPTIME },
+	{ "/proc/loadavg",                   TAWCROOT_PROC_SHADOW_LOADAVG },
+};
+#define N_SHADOW_PATHS ((int)(sizeof shadow_paths / sizeof shadow_paths[0]))
+
+test(hosted_proc_shadow_metadata_synthesized)
+{
+	th_view v;
+	th_setup(&v, "proc-meta");
+
+	for (int i = 0; i < N_SHADOW_PATHS; i++) {
+		const char *path = shadow_paths[i].path;
+		test_int_eq(tawcroot_proc_shadow_classify(path),
+			    shadow_paths[i].kind);
+
+		struct stat st;
+		memset(&st, 0xff, sizeof st);
+		test_int_eq(th_sys(TAWC_SYS_fstatat, AT_FDCWD, path,
+				   &st, 0, 0, 0), 0);
+		test_true(S_ISREG(st.st_mode));
+		test_int_eq(st.st_uid, 0);
+		test_int_eq(st.st_gid, 0);
+		test_int_eq(st.st_nlink, 1);
+		test_int_eq(st.st_size, 0);
+
+		struct statx stx;
+		memset(&stx, 0xff, sizeof stx);
+		test_int_eq(th_sys(TAWC_SYS_statx, AT_FDCWD, path, 0,
+				   STATX_BASIC_STATS, &stx, 0), 0);
+		test_true(S_ISREG(stx.stx_mode));
+		test_int_eq(stx.stx_uid, 0);
+		test_int_eq(stx.stx_gid, 0);
+		test_int_eq(stx.stx_nlink, 1);
+		test_int_eq(stx.stx_size, 0);
+		test_int_eq(stx.stx_mask & STATX_BASIC_STATS,
+			    STATX_BASIC_STATS);
+
+		/* 0444: readable and existing, never writable or
+		 * executable. */
+		test_int_eq(th_sys(TAWC_SYS_faccessat, AT_FDCWD, path,
+				   F_OK, 0, 0, 0), 0);
+		test_int_eq(th_sys(TAWC_SYS_faccessat, AT_FDCWD, path,
+				   R_OK, 0, 0, 0), 0);
+		test_int_eq(th_sys(TAWC_SYS_faccessat, AT_FDCWD, path,
+				   W_OK, 0, 0, 0), TAWC_EACCES);
+		test_int_eq(th_sys(TAWC_SYS_faccessat, AT_FDCWD, path,
+				   X_OK, 0, 0, 0), TAWC_EACCES);
+	}
+
+	th_teardown(&v);
+}
+
+test(hosted_proc_shadow_metadata_fd_relative)
+{
+	th_view v;
+	th_setup(&v, "proc-metarel");
+
+	/* fstatat(<fd of /proc>, "version") must reach the shadow too —
+	 * the composed form is what a guest that cached a /proc dirfd
+	 * uses, and without the compose it hits the denied inode. */
+	int pfd = open("/proc", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	test_true(pfd >= 0);
+
+	struct stat st;
+	memset(&st, 0xff, sizeof st);
+	test_int_eq(th_sys(TAWC_SYS_fstatat, pfd, "version", &st, 0, 0, 0), 0);
+	test_true(S_ISREG(st.st_mode));
+	test_int_eq(st.st_size, 0);
+	test_int_eq(st.st_uid, 0);
+
+	struct statx stx;
+	memset(&stx, 0xff, sizeof stx);
+	test_int_eq(th_sys(TAWC_SYS_statx, pfd, "uptime", 0,
+			   STATX_BASIC_STATS, &stx, 0), 0);
+	test_true(S_ISREG(stx.stx_mode));
+	test_int_eq(stx.stx_size, 0);
+
+	test_int_eq(th_sys(TAWC_SYS_faccessat, pfd, "loadavg", R_OK,
+			   0, 0, 0), 0);
+	test_int_eq(th_sys(TAWC_SYS_faccessat, pfd, "loadavg", W_OK,
+			   0, 0, 0), TAWC_EACCES);
+
+	/* The open surface takes the same composed path. */
+	long fd = th_sys(TAWC_SYS_openat, pfd, "version", O_RDONLY, 0, 0, 0);
+	test_true(fd >= 0);
+	test_int_eq(close((int)fd), 0);
+
+	test_int_eq(close(pfd), 0);
+	th_teardown(&v);
+}
+
+test(hosted_proc_shadow_open_stat_lockstep)
+{
+	th_view v;
+	th_setup(&v, "proc-lockstep");
+
+	/* Cover check: shadow_paths must name every kind the classifier
+	 * knows. A new kind added to proc_shadow.h without a table entry
+	 * (hence without both surfaces exercised) fails here. */
+	for (int kind = 1; kind <= TAWCROOT_PROC_SHADOW_KIND_MAX; kind++) {
+		int found = 0;
+		for (int i = 0; i < N_SHADOW_PATHS; i++)
+			if (shadow_paths[i].kind == kind) found = 1;
+		test_int_eq(found, 1);
+	}
+
+	/* Every kind that opens must also stat, and vice versa: a path
+	 * that stats fine but fails to open is a worse lie than one that
+	 * fails both ways. */
+	for (int i = 0; i < N_SHADOW_PATHS; i++) {
+		const char *path = shadow_paths[i].path;
+		long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, path,
+				 O_RDONLY, 0, 0, 0);
+		test_true(fd >= 0);
+		test_int_eq(close((int)fd), 0);
+
+		struct stat st;
+		test_int_eq(th_sys(TAWC_SYS_fstatat, AT_FDCWD, path,
+				   &st, 0, 0, 0), 0);
+	}
+
+	th_teardown(&v);
+}
+
+/* --- new content synthesizers ------------------------------------------ */
+
+/* Read a shadow through the openat handler into `buf` (NUL-terminated).
+ * Returns the byte count. */
+static long read_shadow(TestCtx *test_ctx, const char *path,
+			char *buf, size_t cap)
+{
+	long fd = th_sys(TAWC_SYS_openat, AT_FDCWD, path, O_RDONLY, 0, 0, 0);
+	test_true(fd >= 0);
+	long n = read((int)fd, buf, cap - 1);
+	test_true(n > 0);
+	buf[n] = 0;
+	test_int_eq(close((int)fd), 0);
+	return n;
+}
+
+test(hosted_proc_version_shadow_content)
+{
+	th_view v;
+	th_setup(&v, "proc-version");
+
+	char buf[512];
+	read_shadow(test_ctx, "/proc/version", buf, sizeof buf);
+
+	/* Kernel shape, with our marker in the builder parenthetical —
+	 * the host's real /proc/version IS readable, so the marker is
+	 * what distinguishes the shadow from a passthrough. */
+	test_true(strncmp(buf, "Linux version ", 14) == 0);
+	test_nonnull(strstr(buf, "(tawcroot@android)"));
+	test_int_eq(buf[strlen(buf) - 1], '\n');
+
+	th_teardown(&v);
+}
+
+test(hosted_proc_uptime_shadow_content)
+{
+	th_view v;
+	th_setup(&v, "proc-uptime");
+
+	char buf[128];
+	read_shadow(test_ctx, "/proc/uptime", buf, sizeof buf);
+
+	/* "<up>.<cs> <idle>.<cs>\n", both non-negative and EQUAL — the
+	 * idle figure must agree with the all-idle cpu line /proc/stat
+	 * emits or procps prints negative CPU usage. */
+	char *end = NULL;
+	double up = strtod(buf, &end);
+	test_true(end != buf);
+	test_true(up >= 0.0);
+	char *end2 = NULL;
+	double idle = strtod(end, &end2);
+	test_true(end2 != end);
+	test_true(idle >= 0.0);
+	test_true(up == idle);
+	test_str_eq(end2, "\n");
+
+	th_teardown(&v);
+}
+
+test(hosted_proc_loadavg_shadow_content)
+{
+	th_view v;
+	th_setup(&v, "proc-loadavg");
+
+	char buf[128];
+	read_shadow(test_ctx, "/proc/loadavg", buf, sizeof buf);
+
+	char want[64];
+	snprintf(want, sizeof want, "0.00 0.00 0.00 1/1 %d\n", getpid());
+	test_str_eq(buf, want);
 
 	th_teardown(&v);
 }

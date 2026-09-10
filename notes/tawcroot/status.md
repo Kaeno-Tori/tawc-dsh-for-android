@@ -493,13 +493,26 @@ backed by a very large profiled win.
   operands to owned translated buffers freed when matching CQEs
   complete; treat unknown opcodes as explicit allow/warn/deny
   decisions. Roughly 500–1000 LOC in a self-contained `src/uring.c`.
-- **More `/proc` shadows.** Extend the existing memfd-shadow pattern
-  (proc_shadow.c) only when a workload needs it. Likely candidates:
+- **More `/proc` shadows.** Extend the existing shadow pattern
+  (proc_shadow.c) only when a workload needs it. One classifier kind
+  plus one content synthesizer gets both the open and the metadata
+  (stat/statx/access) surface — the latter was added with
+  `version`/`uptime`/`loadavg`, because Android denies `untrusted_app`
+  `getattr` as well as `read`, so shadows that only covered `open`
+  still stat'ed EACCES (LibreOffice's `oosplash` only ever *stats*
+  `/proc/version`, and hard-exited with "ERROR: /proc not mounted").
+  Currently shadowed: `<pid>/maps`, `sys/kernel/overflow{uid,gid}`,
+  `bus/pci/devices`, `stat`, `version`, `uptime`, `loadavg`.
+  Still denied and unshadowed, no workload has asked: `cmdline`,
+  `filesystems`, `sys/kernel/osrelease`, `kallsyms`, `modules`,
+  `vmstat`. (`cpuinfo`, `meminfo`, `mounts`, `self/maps`,
+  `self/status` read fine.) Other likely candidates:
   `/proc/<pid>/auxv`, `/proc/<pid>/task/<tid>/maps`.
   (`/proc/<pid>/cmdline` no longer needs a shadow — the kernel value
   is real since the proctitle work; `/proc/stat` is shadowed with a
-  synthesized btime + idle-only cpu line because SELinux denies
-  untrusted_app the real file and procps `ps` hard-requires `btime`.)
+  synthesized btime + idle-only cpu line because procps `ps`
+  hard-requires `btime`, and `/proc/uptime` reports idle equal to
+  uptime so the two agree.)
 - **Path-component negative cache** (perf; profile first). Cache
   recent "not a symlink" prefix components so the resolver skips
   repeated `readlinkat` calls. Bounded table, invalidated on root-view

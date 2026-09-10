@@ -464,5 +464,15 @@ Refactored conventions every fs-handler follows (June 2026 cleanup):
   `tawcroot_deny_eperm` (dispatch.c) with the rationale comment at the
   registration site.
 - **/proc shadow synthesis** lives in `proc_shadow.c`; adding a shadow
-  file means one synthesizer + one line in `tawcroot_proc_shadow_open`.
+  file means one classifier kind, one content synthesizer and one line
+  in `tawcroot_proc_shadow_open`. The stat surface comes free: one
+  classifier (`tawcroot_proc_shadow_classify`) feeds all four handlers
+  (open, stat, statx, access), and the metadata answers are synthesized
+  from the kind, never from the memfd — building content on every stat
+  would re-read and rewrite the whole maps file for an
+  `ls -l /proc/self`. **Lockstep rule:** every kind that opens must
+  also stat. Handlers reach the classifier through
+  `proc_shadow_classify_at` (syscalls_fs.c), which also retries via
+  fd-relative composition; `hosted_proc_shadow_open_stat_lockstep`
+  fails CI if a new kind lands on only one surface.
 

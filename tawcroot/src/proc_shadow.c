@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <sys/stat.h>
+
 #include "errno_neg.h"
 #include "io.h"
 #include "loader_map.h"
@@ -10,21 +12,24 @@
 #include "proc_rewrite.h"
 #include "proc_shadow.h"
 #include "raw_sys.h"
+#include "syscalls_fs.h"
 #include "sysnr.h"
 #include "tawc_string.h"
 #include "tawc_uapi.h"
 
 /* Fast-out: does this guest-relative leaf even have a chance of
  * composing into a /proc/<x> path that we shadow? Legitimate first chars
- * are {b,c,s,t,m,e,digit} — covering "bus/" (pci/devices), "cwd",
- * "self/", "sys/", "task/", "maps", "exe", and numeric "<tid>/" forms.
- * Anything else (the vast majority of fd-relative opens — config files,
- * dotfiles, library names, etc.) skips the readlinkat. */
+ * are {b,c,s,t,m,e,l,u,v,digit} — covering "bus/" (pci/devices), "cwd",
+ * "self/", "stat", "sys/", "task/", "maps", "exe", "loadavg", "uptime",
+ * "version", and numeric "<tid>/" forms. Anything else (the vast
+ * majority of fd-relative opens and stats — config files, dotfiles,
+ * library names, etc.) skips the readlinkat. */
 int tawcroot_could_be_proc_relative(const char *p)
 {
 	char c = p[0];
 	return c == 'b' || c == 'c' || c == 's' || c == 't' || c == 'm' ||
-	       c == 'e' || (c >= '0' && c <= '9');
+	       c == 'e' || c == 'l' || c == 'u' || c == 'v' ||
+	       (c >= '0' && c <= '9');
 }
 
 
@@ -307,39 +312,36 @@ static int is_proc_self_maps(const char *path)
 	return tail && tawc_streq(tail, "maps") && resolve_mine(tid);
 }
 
-/* Match the /proc/sys/kernel/overflow{uid,gid} pair. Returns the memfd
- * label on a hit (the suffix is the only thing that varies between the
- * two), NULL otherwise. The label is what shows up under
- * /proc/self/fd/<fd> as "/memfd:tawcroot-overflow{uid,gid} (deleted)" —
- * useful when reading the diagnostic output of a guest that strerror()s
- * its way through bwrap. */
-static const char *match_proc_sys_overflow_id(const char *path)
+/* The one classifier behind all four surfaces. Every shadowed path is
+ * under /proc, so the prefix test fast-outs the overwhelming majority
+ * of stats and accesses before any string compare.
+ *
+ * /proc/bus/pci: only the `devices` file matches. The directory itself
+ * and its per-bus subdirs are not shadowed — guests that want to walk
+ * them get the kernel's normal -EACCES, same as before. */
+int tawcroot_proc_shadow_classify(const char *path)
 {
+	if (!tawc_starts_with(path, "/proc/"))
+		return TAWCROOT_PROC_SHADOW_NONE;
 	if (tawc_streq(path, "/proc/sys/kernel/overflowuid"))
-		return "tawcroot-overflowuid";
+		return TAWCROOT_PROC_SHADOW_OVERFLOWUID;
 	if (tawc_streq(path, "/proc/sys/kernel/overflowgid"))
-		return "tawcroot-overflowgid";
-	return NULL;
-}
-
-/* Match the single file libpci's procfs back-end opens to enumerate
- * PCI devices. The directory itself (`/proc/bus/pci`) and per-bus
- * subdirs are not matched — guests that want to walk them get the
- * kernel's normal -EACCES, same as today. */
-static int is_proc_bus_pci_devices(const char *path)
-{
-	return tawc_streq(path, "/proc/bus/pci/devices");
-}
-
-/* /proc/stat: Android's SELinux denies untrusted_app the read, so
- * procps `ps` dies with "Unable to get system boot time" (it needs the
- * `btime` line). Synthesize the minimum procps needs: btime derived
- * from CLOCK_REALTIME − CLOCK_BOOTTIME, an aggregate cpu line (all
- * ticks idle — we can't see the real accounting either), and the
- * fixed-shape counters tools expect to exist. */
-static int is_proc_stat(const char *path)
-{
-	return tawc_streq(path, "/proc/stat");
+		return TAWCROOT_PROC_SHADOW_OVERFLOWGID;
+	if (tawc_streq(path, "/proc/bus/pci/devices"))
+		return TAWCROOT_PROC_SHADOW_PCI_DEVICES;
+	if (tawc_streq(path, "/proc/stat"))
+		return TAWCROOT_PROC_SHADOW_STAT;
+	if (tawc_streq(path, "/proc/version"))
+		return TAWCROOT_PROC_SHADOW_VERSION;
+	if (tawc_streq(path, "/proc/uptime"))
+		return TAWCROOT_PROC_SHADOW_UPTIME;
+	if (tawc_streq(path, "/proc/loadavg"))
+		return TAWCROOT_PROC_SHADOW_LOADAVG;
+	/* Last: the only kind whose match can cost a /proc/<n>/status
+	 * read (numeric-pid ownership resolution). */
+	if (is_proc_self_maps(path))
+		return TAWCROOT_PROC_SHADOW_MAPS;
+	return TAWCROOT_PROC_SHADOW_NONE;
 }
 
 /* /proc/self/maps shadow fd. Read the kernel's maps file in full,
@@ -493,7 +495,9 @@ static long open_proc_maps_shadow(void)
  * Documentation/admin-guide/sysctl/kernel.rst). Stays in lockstep with
  * the kernel default; the value hasn't changed since the sysctl landed,
  * and uid/gid have always shared it. The `memfd_name` distinguishes
- * the two in /proc/self/fd/<fd> readlinks for diagnostic clarity. */
+ * the two in /proc/self/fd/<fd> readlinks — "/memfd:tawcroot-overflowuid
+ * (deleted)" — which is useful when reading the diagnostic output of a
+ * guest that strerror()s its way through bwrap. */
 static long open_proc_overflow_id_shadow(const char *memfd_name)
 {
 	return memfd_from_bytes(memfd_name, "65534\n", 6);
@@ -512,17 +516,37 @@ static long open_proc_bus_pci_devices_shadow(void)
 				 1U /*MFD_CLOEXEC*/);
 }
 
+static void realtime_now(long *sec, long *nsec)
+{
+	struct { long sec; long nsec; } rt = { 0, 0 };
+	(void)TAWC_RAW(TAWC_SYS_clock_gettime, 0 /*CLOCK_REALTIME*/,
+		       (long)&rt, 0, 0, 0, 0);
+	*sec = rt.sec;
+	*nsec = rt.nsec;
+}
+
+/* CLOCK_BOOTTIME as (seconds, centiseconds). Both /proc/uptime fields
+ * and the /proc/stat idle line derive from this one helper — they have
+ * to agree or procps computes a negative CPU usage. */
+static void boottime_now(long *sec, long *cs)
+{
+	struct { long sec; long nsec; } bt = { 0, 0 };
+	(void)TAWC_RAW(TAWC_SYS_clock_gettime, 7 /*CLOCK_BOOTTIME*/,
+		       (long)&bt, 0, 0, 0, 0);
+	if (bt.sec < 0) bt.sec = 0;
+	*sec = bt.sec;
+	*cs  = bt.nsec / 10000000;
+}
+
 static long open_proc_stat_shadow(void)
 {
-	struct { long sec; long nsec; } rt = { 0, 0 }, bt = { 0, 0 };
-	(void)TAWC_RAW(TAWC_SYS_clock_gettime, 0 /*CLOCK_REALTIME*/,
-	               (long)&rt, 0, 0, 0, 0);
-	(void)TAWC_RAW(TAWC_SYS_clock_gettime, 7 /*CLOCK_BOOTTIME*/,
-	               (long)&bt, 0, 0, 0, 0);
-	long btime = rt.sec - bt.sec;
+	long rt_sec, rt_nsec, up_sec, up_cs;
+	realtime_now(&rt_sec, &rt_nsec);
+	boottime_now(&up_sec, &up_cs);
+	long btime = rt_sec - up_sec;
 	if (btime < 1) btime = 1;
 	/* USER_HZ is 100 on both supported arches. */
-	long idle_ticks = bt.sec * 100;
+	long idle_ticks = up_sec * 100;
 
 	char buf[256];
 	size_t pos = 0;
@@ -539,31 +563,222 @@ static long open_proc_stat_shadow(void)
 	return memfd_from_bytes("tawcroot-stat", buf, pos);
 }
 
-/* Classify `path` against the three /proc shadows and synthesize the
- * matching fd. Returns 1 on a hit (with *out set to the new fd or the
- * synthesizer's -errno) and 0 on no match. Centralising the dispatch
- * keeps the absolute-path and fd-relative branches in handle_openat
- * automatically in lockstep — a future fourth shadow only needs one
- * line added here. */
-int tawcroot_proc_shadow_open(const char *path, long *out)
+/* Append "<sec>.<cs>" with the centiseconds zero-padded to two digits,
+ * the fixed shape every /proc/uptime parser expects. */
+static long append_secs_cs(char *buf, size_t cap, size_t *pos,
+			   long sec, long cs)
 {
-	const char *overflow_name;
-	if (is_proc_self_maps(path)) {
-		*out = open_proc_maps_shadow();
-		return 1;
+	long e = tawc_str_append_dec(buf, cap, pos, sec);
+	if (!e) e = tawc_str_append(buf, cap, pos, cs < 10 ? ".0" : ".");
+	if (!e) e = tawc_str_append_dec(buf, cap, pos, cs);
+	return e;
+}
+
+/* /proc/version shadow fd. Android labels the real file
+ * `u:object_r:proc_version:s0`, which untrusted_app may neither read
+ * nor getattr, and the denial is dontaudit'ed so logcat shows nothing.
+ * LibreOffice's `oosplash` stats it once and hard-exits with
+ * "ERROR: /proc not mounted" when that fails, so a plain `libreoffice
+ * --version` never starts. uname(2) is unaffected, so the real kernel
+ * strings are available: the synthesized file has the kernel's own
+ * shape — release, builder parenthetical, compiler parenthetical,
+ * version — with only the two parentheticals invented.
+ * `tawcroot@android` doubles as the marker the hosted tests grep for,
+ * since a test host's real /proc/version IS readable and would
+ * otherwise be indistinguishable from a passthrough. */
+static long open_proc_version_shadow(void)
+{
+	/* Linux's `new_utsname`: six __NEW_UTS_LEN+1 == 65-byte fields. */
+	struct { char f[6][65]; } uts;
+	memset(&uts, 0, sizeof uts);
+	if (TAWC_RAW(TAWC_SYS_uname, (long)&uts, 0, 0, 0, 0, 0) < 0)
+		return TAWC_EIO;
+	uts.f[2][64] = 0;
+	uts.f[3][64] = 0;
+
+	char buf[320];
+	size_t pos = 0;
+	long e = tawc_str_append(buf, sizeof buf, &pos, "Linux version ");
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, uts.f[2]);
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos,
+				    " (tawcroot@android) (tawcroot) ");
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, uts.f[3]);
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, "\n");
+	if (e) return TAWC_EFAULT;
+	return memfd_from_bytes("tawcroot-version", buf, pos);
+}
+
+/* /proc/uptime shadow fd. Also denied to untrusted_app; `uptime`, `w`
+ * and procps in general want it. Idle is reported EQUAL to uptime,
+ * matching the all-ticks-idle cpu line the /proc/stat shadow derives
+ * from the same boottime_now(). */
+static long open_proc_uptime_shadow(void)
+{
+	long sec, cs;
+	boottime_now(&sec, &cs);
+
+	char buf[96];
+	size_t pos = 0;
+	long e = append_secs_cs(buf, sizeof buf, &pos, sec, cs);
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, " ");
+	if (!e) e = append_secs_cs(buf, sizeof buf, &pos, sec, cs);
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, "\n");
+	if (e) return TAWC_EFAULT;
+	return memfd_from_bytes("tawcroot-uptime", buf, pos);
+}
+
+/* /proc/loadavg shadow fd. Fixed zero loads (we cannot see the host
+ * scheduler), one runnable of one, and our own pid as "last pid" —
+ * every consumer treats that field as informational. */
+static long open_proc_loadavg_shadow(void)
+{
+	char buf[96];
+	size_t pos = 0;
+	long e = tawc_str_append(buf, sizeof buf, &pos, "0.00 0.00 0.00 1/1 ");
+	if (!e) e = tawc_str_append_dec(buf, sizeof buf, &pos,
+					TAWC_RAW(TAWC_SYS_getpid,
+						 0, 0, 0, 0, 0, 0));
+	if (!e) e = tawc_str_append(buf, sizeof buf, &pos, "\n");
+	if (e) return TAWC_EFAULT;
+	return memfd_from_bytes("tawcroot-loadavg", buf, pos);
+}
+
+long tawcroot_proc_shadow_open(int kind)
+{
+	switch (kind) {
+	case TAWCROOT_PROC_SHADOW_MAPS:
+		return open_proc_maps_shadow();
+	case TAWCROOT_PROC_SHADOW_OVERFLOWUID:
+		return open_proc_overflow_id_shadow("tawcroot-overflowuid");
+	case TAWCROOT_PROC_SHADOW_OVERFLOWGID:
+		return open_proc_overflow_id_shadow("tawcroot-overflowgid");
+	case TAWCROOT_PROC_SHADOW_PCI_DEVICES:
+		return open_proc_bus_pci_devices_shadow();
+	case TAWCROOT_PROC_SHADOW_STAT:
+		return open_proc_stat_shadow();
+	case TAWCROOT_PROC_SHADOW_VERSION:
+		return open_proc_version_shadow();
+	case TAWCROOT_PROC_SHADOW_UPTIME:
+		return open_proc_uptime_shadow();
+	case TAWCROOT_PROC_SHADOW_LOADAVG:
+		return open_proc_loadavg_shadow();
+	default:
+		return TAWC_EINVAL;
 	}
-	overflow_name = match_proc_sys_overflow_id(path);
-	if (overflow_name) {
-		*out = open_proc_overflow_id_shadow(overflow_name);
-		return 1;
+}
+
+/* ---- metadata surfaces ------------------------------------------------
+ *
+ * Deliberately NOT "build the memfd and fstat it": for MAPS that would
+ * read and rewrite the whole maps file on every stat, and an `ls -l
+ * /proc/self` stats a lot. A procfs regular-file inode is fully
+ * describable without its content — mode, one link, root-owned, size 0,
+ * "now" for all three times — so synthesize the numbers directly.
+ */
+
+/* Device of the procfs mount. /proc itself is readable and statable
+ * (Android's denials are per-file labels, not the mount), so one probe
+ * serves the process lifetime; racing probers all store the same value.
+ * Nothing in the target workloads compares st_dev, but keeping the
+ * shadows on the procfs device costs one syscall total. */
+static unsigned int proc_dev_major_cache, proc_dev_minor_cache;
+static int proc_dev_known;
+
+static void proc_dev_probe(void)
+{
+	if (proc_dev_known) return;
+	struct statx sx;
+	memset(&sx, 0, sizeof sx);
+	if (TAWC_RAW(TAWC_SYS_statx, AT_FDCWD, (long)"/proc", 0,
+		     STATX_INO, (long)&sx, 0) != 0)
+		return;
+	proc_dev_major_cache = sx.stx_dev_major;
+	proc_dev_minor_cache = sx.stx_dev_minor;
+	proc_dev_known = 1;
+}
+
+/* A fixed per-kind inode, parked far above any real procfs number so it
+ * can't collide with one the guest saw through a passthrough stat. */
+static unsigned long shadow_ino(int kind)
+{
+	return 0x7a77c0000000UL + (unsigned long)kind;
+}
+
+long tawcroot_proc_shadow_stat(int kind, struct stat *out)
+{
+	if (kind <= TAWCROOT_PROC_SHADOW_NONE ||
+	    kind > TAWCROOT_PROC_SHADOW_KIND_MAX)
+		return TAWC_EINVAL;
+	proc_dev_probe();
+	long sec, nsec;
+	realtime_now(&sec, &nsec);
+
+	memset(out, 0, sizeof *out);
+	out->st_dev = (__typeof__(out->st_dev))
+		TAWC_MKDEV(proc_dev_major_cache, proc_dev_minor_cache);
+	out->st_ino = (__typeof__(out->st_ino))shadow_ino(kind);
+	out->st_mode = S_IFREG | 0444;
+	out->st_nlink = 1;
+	out->st_uid = 0;
+	out->st_gid = 0;
+	out->st_size = 0;
+	out->st_blksize = 1024;
+	out->st_blocks = 0;
+	out->st_atim.tv_sec = sec; out->st_atim.tv_nsec = nsec;
+	out->st_mtim.tv_sec = sec; out->st_mtim.tv_nsec = nsec;
+	out->st_ctim.tv_sec = sec; out->st_ctim.tv_nsec = nsec;
+	return 0;
+}
+
+long tawcroot_proc_shadow_statx(int kind, unsigned int mask,
+				struct statx *out)
+{
+	if (kind <= TAWCROOT_PROC_SHADOW_NONE ||
+	    kind > TAWCROOT_PROC_SHADOW_KIND_MAX)
+		return TAWC_EINVAL;
+	proc_dev_probe();
+	long sec, nsec;
+	realtime_now(&sec, &nsec);
+
+	memset(out, 0, sizeof *out);
+	out->stx_dev_major = proc_dev_major_cache;
+	out->stx_dev_minor = proc_dev_minor_cache;
+	out->stx_ino = shadow_ino(kind);
+	out->stx_mode = (uint16_t)(S_IFREG | 0444);
+	out->stx_nlink = 1;
+	out->stx_uid = 0;
+	out->stx_gid = 0;
+	out->stx_size = 0;
+	out->stx_blksize = 1024;
+	out->stx_blocks = 0;
+	out->stx_atime.tv_sec = sec; out->stx_atime.tv_nsec = (uint32_t)nsec;
+	out->stx_mtime.tv_sec = sec; out->stx_mtime.tv_nsec = (uint32_t)nsec;
+	out->stx_ctime.tv_sec = sec; out->stx_ctime.tv_nsec = (uint32_t)nsec;
+	out->stx_mask = STATX_BASIC_STATS;
+	/* Mount id: no backing fd for the synthetic file, but it claims to
+	 * live on the procfs mount, so an O_PATH fd of /proc answers for
+	 * it. Same reason the shm synthesizers fill one — systemd's
+	 * chase() EUNATCHes without it. */
+	if (mask & (STATX_MNT_ID | STATX_MNT_ID_UNIQUE)) {
+		long pfd = tawc_openat(AT_FDCWD, "/proc",
+				       O_PATH | O_DIRECTORY | O_CLOEXEC, 0);
+		if (pfd >= 0) {
+			tawcroot_statx_fill_mnt_id((int)pfd, 0, mask, out);
+			tawc_close((int)pfd);
+		}
 	}
-	if (is_proc_bus_pci_devices(path)) {
-		*out = open_proc_bus_pci_devices_shadow();
-		return 1;
-	}
-	if (is_proc_stat(path)) {
-		*out = open_proc_stat_shadow();
-		return 1;
-	}
+	return 0;
+}
+
+long tawcroot_proc_shadow_access(int kind, int mode)
+{
+	if (kind <= TAWCROOT_PROC_SHADOW_NONE ||
+	    kind > TAWCROOT_PROC_SHADOW_KIND_MAX)
+		return TAWC_EINVAL;
+	/* The shadows are 0444 regular files: F_OK and R_OK pass, any
+	 * write or execute probe is -EACCES. faccessat carries no flags
+	 * and faccessat2-with-flags is already -ENOSYS'd by the handler,
+	 * so there is no NOFOLLOW variant to consider. */
+	if (mode & (2 /*W_OK*/ | 1 /*X_OK*/)) return TAWC_EACCES;
 	return 0;
 }
