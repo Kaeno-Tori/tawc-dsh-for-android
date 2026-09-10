@@ -78,6 +78,7 @@ import me.phie.tawc.tasks.ProcessScanner
  * | `hardware-key` | `keycode`, `action=down|up|press`, `repeat` | focused Activity/view `dispatchKeyEvent(KeyEvent(...))` |
  * | `back` | — | focused Activity back-press path (same entry as the system OnBackInvoked callback) |
  * | `inject-touch` | `kind=tap|tap-logical|tap-outside-popup|drag|multitouch` | Dispatch MotionEvents to the focused SurfaceView |
+ * | `inject-pointer` | `kind=move|button|scroll|hscroll|hover-exit`, `x`, `y`, `button`, `amount` | Dispatch SOURCE_MOUSE MotionEvents to the focused SurfaceView |
  *
  * Test-mode helpers:
  *
@@ -115,6 +116,7 @@ internal object InputActions {
         ActionRegistry.register("hardware-key", HardwareKeyAction)
         ActionRegistry.register("back", BackAction)
         ActionRegistry.register("inject-touch", InjectTouchAction)
+        ActionRegistry.register("inject-pointer", InjectPointerAction)
 
         ActionRegistry.register("query-state", QueryStateAction)
         ActionRegistry.register("app-info", AppInfoAction)
@@ -443,6 +445,41 @@ internal object InputActions {
             }
             if (status != 0) return status
             return injectError?.let { ctx.fail("inject-touch: $it") } ?: 0
+        }
+    }
+
+    /**
+     * `inject-pointer` — drive real mouse input through the focused
+     * SurfaceView. Same rule as [InjectTouchAction]: the Activity's own
+     * MotionEvent decoding (source split, button-mask diff, hover rules) is
+     * part of what the test exercises, so this builds `SOURCE_MOUSE` events
+     * rather than calling the native trampoline.
+     */
+    private object InjectPointerAction : BrokerAction {
+        private val KINDS = setOf("move", "button", "scroll", "hscroll", "hover-exit")
+
+        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
+            val kind = args["kind"]
+                ?: return ctx.fail("inject-pointer: --arg kind=${KINDS.joinToString("|")} required")
+            if (kind !in KINDS) {
+                return ctx.fail("inject-pointer: unknown kind '$kind'")
+            }
+            val x = args["x"]?.toFloatOrNull()
+            val y = args["y"]?.toFloatOrNull()
+            if ((args["x"] != null && x == null) || (args["y"] != null && y == null)) {
+                return ctx.fail("inject-pointer: x/y must be numbers")
+            }
+            val amount = args["amount"]?.let {
+                it.toFloatOrNull() ?: return ctx.fail("inject-pointer: amount must be a number")
+            } ?: 1f
+            var injectError: String? = null
+            val status = withFocusedActivity(ctx) { activity ->
+                injectError = activity.injectPointerSequenceForDev(
+                    kind, x, y, args["button"], amount,
+                )
+            }
+            if (status != 0) return status
+            return injectError?.let { ctx.fail("inject-pointer: $it") } ?: 0
         }
     }
 

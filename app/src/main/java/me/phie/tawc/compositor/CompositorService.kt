@@ -58,6 +58,11 @@ class CompositorService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var lifecycle = Lifecycle.STOPPED
     private var restartAfterStop = false
+    /** Seeds and follows the compositor's "a mouse is attached" reason for
+     *  the `wl_pointer` seat capability. Lives here rather than on an
+     *  Activity: it is one process-wide fact, and the compositor outlives
+     *  every Activity. */
+    private var mouseWatcher: MouseWatcher? = null
 
     val openWindows: StateFlow<List<OpenWindow>> = windowRegistry.windows
 
@@ -171,6 +176,7 @@ class CompositorService : Service() {
         NativeBridge.nativeSetOutputScale(me.phie.tawc.Settings.outputScale)
         NativeBridge.nativeSetXwaylandEnabled(me.phie.tawc.Settings.xwayland)
         NativeBridge.nativeSetGtk3BrokenMenusWorkaround(me.phie.tawc.Settings.gtk3BrokenMenusWorkaround)
+        mouseWatcher = MouseWatcher(this).also { it.start() }
         lifecycle = Lifecycle.RUNNING
     }
 
@@ -214,6 +220,8 @@ class CompositorService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        mouseWatcher?.stop()
+        mouseWatcher = null
         NativeBridge.nativeStopCompositor()
         NativeBridge.detachService()
         activities.clear()
@@ -323,6 +331,10 @@ class CompositorService : Service() {
         restartAfterStop = false
         serviceScope.launch {
             Log.i(TAG, "Notification exit requested")
+            // Stop before the compositor goes away so a restart re-seeds
+            // mouse presence instead of dropping it as an unchanged value.
+            mouseWatcher?.stop()
+            mouseWatcher = null
             NativeBridge.nativeStopCompositor()
             toplevelCount.value = 0
             windowRegistry.clear()

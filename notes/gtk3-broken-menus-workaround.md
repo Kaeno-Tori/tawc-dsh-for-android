@@ -8,14 +8,22 @@ menus workaround**, with the description:
 
 > Spoof a pointer briefly entering each window, allows GTK3 menus to work correctly
 
-It is enabled by default. When enabled, the Wayland seat advertises
-`wl_pointer` and tawc briefly sends pointer enter/leave at the center of each
-new xdg toplevel. When disabled, tawc removes the pointer capability and stops
+It is enabled by default. When enabled, the workaround asks for the
+`wl_pointer` seat capability and tawc briefly sends pointer enter/leave at the
+center of each new xdg toplevel. When disabled, it drops its request and stops
 sending these synthetic pointer events.
 
-This is intentionally a contained workaround, not the start of a general
-touch-to-pointer input path. Android touchscreen input still goes through
-`wl_touch`; tawc does not translate finger taps into pointer buttons.
+It is *not* the owner of the capability. Attached mouse hardware is the other
+reason a pointer can exist, and `TawcState::sync_pointer_capability` is the
+single owner that reconciles both — see [input.md](input.md) ("Seat
+capability"). Calling `add_pointer` on a seat that already has one replaces the
+`PointerHandle` and drops focus and grabs, so this module must never touch the
+seat itself.
+
+This is intentionally a contained workaround, not a touch-to-pointer input
+path. Android touchscreen input still goes through `wl_touch`; tawc does not
+translate finger taps into pointer buttons. Real mouse input is a separate,
+real `wl_pointer` path.
 
 ## Symptom
 
@@ -134,9 +142,14 @@ so it is easy to remove later:
 - `gtk3_menus_workaround::after_commit`: primes each new toplevel once after
   its first buffer commit.
 
-When enabled at compositor startup, `gtk3_menus_workaround::init_seat()` adds
-the pointer. When the setting changes live, the helper calls
-`seat.add_pointer()` or `seat.remove_pointer()` and updates its state.
+`set_enabled` flips only this module's reason and then calls
+`TawcState::sync_pointer_capability`, which adds or removes the seat pointer
+on the 0<->1 transition across both reasons.
+
+Priming ends by restoring the pointer to wherever it already was, rather than
+by an unconditional leave: with a real mouse hovering a window, leaving to
+`None` on every new toplevel commit would yank the pointer out from under the
+user.
 
 The pointer capability is a seat-level Wayland capability, so it is visible to
 all clients while the workaround is enabled. There is no Wayland mechanism in
@@ -153,6 +166,14 @@ during the initial xdg configure. Some clients create cursor resources only
 after that configure round-trip; sending `wl_pointer.enter` during configure
 can drive their cursor path before setup is complete.
 
+## Open Question: Does It Still Earn Its Keep?
+
+The workaround's whole premise is priming GTK3's cold crossing state on a
+touch-only seat. With a mouse attached the crossing events are real, so the
+priming may be redundant there; with no mouse the workaround's reason is what
+keeps the capability on at all, unchanged. Retire it only with evidence from
+re-testing both cases on a physical device.
+
 ## Removal Map
 
 If GTK3 or tawc's decoration policy changes enough that this workaround is no
@@ -164,5 +185,7 @@ longer needed, remove:
 - `TawcState::gtk3_broken_menus_workaround`;
 - `compositor/src/gtk3_menus_workaround.rs`;
 - the small lifecycle calls to `gtk3_menus_workaround::*`;
+- the `gtk3_workaround` reason in `TawcState::sync_pointer_capability` (keep
+  the owner itself — mouse hardware still needs it);
 - the broker get/set actions and their docs;
 - this note.

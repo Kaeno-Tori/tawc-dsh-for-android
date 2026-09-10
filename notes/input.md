@@ -23,13 +23,10 @@ Touch events flow: Android `onTouchEvent` -> JNI `nativeOnTouchEvent` -> `calloo
   visible render-only child surfaces may use an empty input region, so the touch
   must fall through to the browser toplevel.
 - Multi-touch is supported: each Android pointer ID maps to a Smithay `TouchSlot`.
-- The seat normally advertises only real input capabilities. Keyboard
-  capability is required for Firefox to enable text input (see text-input.md).
-  The one explicit exception is the optional
-  [GTK3 broken menus workaround](gtk3-broken-menus-workaround.md), which
-  exposes a `wl_pointer` and sends a brief center enter/leave for new
-  toplevels. Do not expand that into a general touch-to-pointer path; if real
-  pointer hardware is added, wire it as real pointer input.
+- The seat advertises only real input capabilities. Keyboard capability is
+  required for Firefox to enable text input (see text-input.md).
+  `wl_pointer` has [its own section](#pointer-input) below. Do not turn touch
+  into pointer events: touchscreen input stays on `wl_touch`.
 - Touch-down moves both keyboard focus AND text-input-v3 focus to the target's
   keyboard-focusable surface via `TawcState::set_input_focus` — they are
   conceptually one focus and splitting them invites drift. `wl_subsurface`
@@ -46,6 +43,141 @@ menubar workaround primes that cold crossing state with one synthetic pointer
 enter/leave per new toplevel; it does not convert touches into pointer clicks. When debugging
 touch, check coordinates carefully — the GTK widget tree only routes events to children whose
 GdkWindow allocation contains the hit point.
+
+## Pointer Input
+
+Real mouse input flows: Android mouse-source `MotionEvent` ->
+`nativeOnPointerEvent` -> `calloop::channel` -> Smithay `PointerHandle` ->
+`wl_pointer`. Touch and pointer are separate paths end to end.
+
+**The source split.** Android launders mouse buttons through the touch path:
+a click arrives at `OnTouchListener` as `ACTION_DOWN`/`MOVE`/`UP`. So
+`CompositorActivity.dispatchTouchToCompositor` splits on the event source
+before doing anything else:
+
+- `SOURCE_TOUCHSCREEN` and `SOURCE_STYLUS` -> `wl_touch`. Stylus stays on
+  touch; a real `zwp_tablet_v2` path is out of scope.
+- `SOURCE_MOUSE` (which is also what Android reports for a touchpad driving a
+  cursor) -> `wl_pointer`.
+- Anything else (rotary encoders, gamepads) is ignored.
+
+Without the split a single click delivers both a `wl_touch.down` and a
+`wl_pointer.button` and clients double-handle it.
+
+Wheel (`ACTION_SCROLL`) and hover (`ACTION_HOVER_*`) never reach the touch
+listener at all; `TawcSurfaceView` overrides `onGenericMotionEvent` and
+`onHoverEvent` for them. The hover hook is explicit rather than relying on
+Android's fall-through to generic motion.
+
+**Buttons.** Android reports a button *bitmask*, not per-button actions, so
+presses and releases come from diffing `MotionEvent.buttonState` against the
+previous value; `ACTION_BUTTON_PRESS`/`RELEASE` are ignored because the diff
+already covers them. `BUTTON_PRIMARY`/`SECONDARY`/`TERTIARY`/`BACK`/`FORWARD`
+map to evdev `BTN_LEFT` 0x110, `BTN_RIGHT` 0x111, `BTN_MIDDLE` 0x112,
+`BTN_SIDE` 0x113, `BTN_EXTRA` 0x114. A mouse side button also raises
+`KEYCODE_BACK`/`KEYCODE_FORWARD`; `TawcSurfaceView` swallows those so the
+click does not *also* run the Android Back policy below.
+
+**Scroll units and direction.** Android `AXIS_VSCROLL` is positive scrolling
+away from the user, Wayland's vertical axis is positive downward, so vertical
+is negated; `AXIS_HSCROLL` is already positive-right and is not. One detent is
+`AXIS_VSCROLL == 1.0` -> `axis_value120` 120, and 15 logical pixels in the
+legacy `axis` value (libinput's wheel-click angle, which is what desktop
+clients are tuned against — deliberately *not*
+`ViewConfiguration.getScaledVerticalScrollFactor()`, which is density-scaled
+physical pixels and would make scroll distance depend on the phone). Smithay
+sends `axis_value120` to `wl_pointer` v8+ clients and accumulates
+`axis_discrete` for older ones itself. No "natural scrolling" inversion is
+applied — that is the client's business. A touchpad (the `InputDevice` also
+reports `SOURCE_TOUCHPAD`) uses `axis_source = finger` and gets an `axis_stop`
+frame after a short idle gap, which is what makes GTK's kinetic scrolling
+settle.
+
+**Focus.** Pointer motion and touch share one hit test (`surface_at` in
+`event_loop.rs`), including the visible-host guard and the
+`set_input_region`-honouring `WindowSurfaceType::ALL` lookup. Motion does
+**not** move keyboard focus — hover is not activation. A button *press* takes
+the same path as touch-down: it dismisses a menu it lands outside of and moves
+keyboard/text-input focus. Smithay's default grab keeps pointer focus while a
+button is held, and `PopupPointerGrab` is installed on `xdg_popup` grab.
+
+**Crossing.** Android synthesizes `ACTION_HOVER_EXIT` before every mouse
+`ACTION_DOWN` and `ACTION_HOVER_ENTER` after the matching `ACTION_UP`. Those
+are *not* mapped to `wl_pointer.leave`/`enter` — doing so wraps every click in
+a crossing pair, which closes GTK menus and breaks drags. Real leaves are sent
+by the compositor on Activity focus loss, surface destroy, and host switch
+(`clear_pointer_focus`).
+
+**Seat capability.** `wl_pointer` has exactly one owner,
+`TawcState::sync_pointer_capability`, with two independent reasons: attached
+mouse hardware and the [GTK3 broken menus
+workaround](gtk3-broken-menus-workaround.md). Neither may touch the seat
+directly — smithay's `Seat::add_pointer` on a seat that already has a pointer
+*replaces* the `PointerHandle`, dropping focus and any live grab. The owner
+acts only on the 0<->1 transition. Mouse presence comes from Android:
+`MouseWatcher` enumerates `InputDevice`s, filters to `SOURCE_MOUSE`, and
+follows `InputManager.InputDeviceListener`, sending the aggregate over the
+surface-event channel so it is ordered with focus changes like hardware keys.
+
+With the workaround at its default the capability is on regardless, so the
+owner only changes observable behaviour for users who disabled it. Capability
+*removal* on unplug is legal but rare in the wild; if real clients turn out to
+mishandle it, the fallback is to make the capability sticky for the session
+once a mouse has ever been seen.
+
+## Cursor
+
+Android draws the pointer sprite itself, above the app's surfaces, so tawc
+does not render a second cursor into the Wayland scene. `SeatHandler::
+cursor_image` maps the client's request onto the Activity SurfaceView's
+`PointerIcon` (`compositor/src/cursor.rs` -> `NativeBridge.setPointerIcon` /
+`setPointerIconBitmap`, both posted to the UI thread because
+`View.setPointerIcon` must run there).
+
+- `wp_cursor_shape_v1` is advertised, so the common case is a named shape.
+  Rust sends the CSS/cursor-shape name; Kotlin owns the name ->
+  `PointerIcon.TYPE_*` table. Android has no sprite for a few shapes
+  (`dnd-*`, single-direction resizes), so those collapse onto the nearest one.
+- Hidden -> `TYPE_NULL`.
+- Legacy `wl_pointer.set_cursor` with a surface (Xwayland is the main user) is
+  read out of its SHM buffer and becomes a `PointerIcon.create` bitmap, with
+  the hotspot smithay recorded. Re-read when that surface commits again, so
+  animated cursors follow. Non-SHM cursor buffers (wlegl/AHB) are not worth
+  importing — they fall back to the arrow.
+
+The broker `query-state` action reports the live pointer and cursor —
+`pointer_present`, `pointer_x`, `pointer_y`, `pointer_focus`, `cursor_shape`
+— because motion, axis and cursor changes are all far too high-volume to log.
+`cursor_shape` is a shape name, `hidden`, `bitmap`, or `none`.
+
+Note a client's `set_cursor` is only honoured with the serial of a live
+`wl_pointer.enter` (smithay's `allow_setting_cursor`). The GTK3 workaround's
+prime enters and immediately restores, so a shape requested off that prime
+alone is dropped; a real mouse holds the enter and it sticks.
+
+## Pointer Work Not Done
+
+Deliberately out of scope so far, in rough order of usefulness:
+
+- `zwp_relative_pointer_v1` + `zwp_pointer_constraints_v1` for games and 3D
+  apps. Android's `View.requestPointerCapture()` is the matching side;
+  locked-pointer without capture would let the system cursor drift out of the
+  window.
+- Pointer-initiated `wl_data_device` drag-and-drop. `clipboard.rs` handles
+  selections only.
+- `pointer_gestures` (pinch/swipe) from Android touchpad gestures.
+- Xwayland move/resize grabs, still stubbed with an explicit "we don't have an
+  X11-aware seat path yet" (`compositor/src/xwayland.rs`). X11 clients get
+  pointer events for free through Xwayland's own seat binding; only the
+  WM-side grabs need work.
+- A real `zwp_tablet_v2` path for stylus input, which stays on `wl_touch`.
+
+Open question carried over from the design: whether removing the seat's
+pointer capability on unplug is safe in the wild, or whether it should become
+sticky-for-the-session once a mouse has ever been seen. Decide with a real
+Bluetooth mouse — the emulator has no mouse `InputDevice` at all, so it cannot
+answer it. (Our own test client, `wayland-debug-app`, treats capability
+removal as fatal.)
 
 ## Simulating Touch via adb
 

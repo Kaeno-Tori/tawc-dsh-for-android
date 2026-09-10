@@ -31,7 +31,7 @@ use smithay::reexports::wayland_protocols_misc::server_decoration::server::{
     },
     org_kde_kwin_server_decoration_manager::Mode as KdeDefaultDecorationMode,
 };
-use smithay::utils::Serial;
+use smithay::utils::{Logical, Point, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     self, CompositorClientState, CompositorHandler, CompositorState,
@@ -58,6 +58,8 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::tablet_manager::TabletSeatHandler;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWaylandActivation, XWaylandClientData};
@@ -136,12 +138,30 @@ pub struct TawcState {
     /// to keep popup-grab bookkeeping in sync with `popup_done`.
     pub active_popup_grab: Option<PopupGrab<Self>>,
 
+    /// True while Android reports at least one mouse-class `InputDevice`.
+    /// One of the two reasons the seat advertises `wl_pointer`; see
+    /// [`TawcState::sync_pointer_capability`].
+    pub mouse_attached: bool,
+
+    /// Last real pointer position (logical, compositor space) and the focus
+    /// it resolved to (surface + surface origin) — i.e. what was last handed
+    /// to `PointerHandle::motion`, so the GTK3 prime can restore it instead
+    /// of leaving to `None`. Not authoritative while a grab is active:
+    /// smithay's own `current_focus` is, and the state query reads that.
+    pub pointer_location: Point<f64, Logical>,
+    pub pointer_focus: Option<(WlSurface, Point<f64, Logical>)>,
+
+    /// Cursor presentation state. Android draws the pointer sprite; this
+    /// tracks what was last pushed to the Activity's `PointerIcon`.
+    pub cursor: crate::cursor::State,
+
     /// GTK3 broken menus workaround.
     ///
-    /// This deliberately contained compatibility path exposes a wl_pointer
-    /// and briefly enters/leaves each new toplevel so GTK3 initializes its
-    /// cold pointer-crossing state before touchscreen menubar taps. See
-    /// notes/gtk3-broken-menus-workaround.md.
+    /// This deliberately contained compatibility path asks for a wl_pointer
+    /// (through [`TawcState::sync_pointer_capability`], which owns the
+    /// capability) and briefly enters/leaves each new toplevel so GTK3
+    /// initializes its cold pointer-crossing state before touchscreen
+    /// menubar taps. See notes/gtk3-broken-menus-workaround.md.
     pub gtk3_broken_menus_workaround: crate::gtk3_menus_workaround::State,
 
     /// Output scale factor (physical pixels per logical pixel). Canonical source
@@ -320,7 +340,14 @@ impl TawcState {
         seat.add_keyboard(XkbConfig::default(), 200, 25)
             .expect("Failed to add keyboard to seat");
         seat.add_touch();
-        crate::gtk3_menus_workaround::init_seat(&mut seat, gtk3_broken_menus_workaround_enabled);
+
+        // wp_cursor_shape_v1 turns the common cursor request into an enum
+        // instead of a bitmap upload, which is exactly what maps onto an
+        // Android PointerIcon. Its device dispatch needs TabletSeatHandler;
+        // tawc has no tablet seat, so the default impl is enough. The
+        // returned state has no Drop impl — the global lives for the
+        // lifetime of the Display.
+        CursorShapeManagerState::new::<Self>(&dh);
 
         dh.create_global::<Self, AndroidWlegl, ()>(2, ());
         dh.create_global::<Self, ZwpTextInputManagerV3, ()>(1, ());
@@ -347,6 +374,10 @@ impl TawcState {
             desktop: crate::desktop::DesktopRegistry::new(),
             popup_manager: PopupManager::default(),
             active_popup_grab: None,
+            mouse_attached: false,
+            cursor: crate::cursor::State::new(),
+            pointer_location: Point::from((0.0, 0.0)),
+            pointer_focus: None,
             gtk3_broken_menus_workaround: crate::gtk3_menus_workaround::State::new(
                 gtk3_broken_menus_workaround_enabled,
             ),
@@ -388,6 +419,10 @@ impl TawcState {
             last_rendered_toplevels: 0,
         };
 
+        // The pointer capability has exactly one owner; at construction the
+        // only reason that can be set is the GTK3 workaround.
+        state.sync_pointer_capability();
+
         // The output global lives for the whole life of the compositor. A
         // registry with no wl_output is a state very little client code
         // handles (SDL's video init fails outright, Xwayland has no screen
@@ -400,6 +435,30 @@ impl TawcState {
         state.output.create_global::<Self>(&state.display_handle);
 
         state
+    }
+
+    /// Sole owner of the seat's `wl_pointer` capability.
+    ///
+    /// Two independent reasons want a pointer: attached mouse hardware
+    /// ([`TawcState::mouse_attached`]) and the GTK3 broken menubar
+    /// workaround. Neither may touch the seat directly: smithay's
+    /// `Seat::add_pointer` on a seat that already has a pointer *replaces*
+    /// the `PointerHandle`, dropping focus and any live grab. Call this
+    /// after changing either reason; it acts only on the 0↔1 transition.
+    pub fn sync_pointer_capability(&mut self) {
+        let wanted = self.mouse_attached || self.gtk3_broken_menus_workaround.enabled;
+        let present = self.seat.get_pointer().is_some();
+        if wanted == present {
+            return;
+        }
+        if wanted {
+            self.seat.add_pointer();
+        } else {
+            self.seat.remove_pointer();
+            self.pointer_focus = None;
+            crate::cursor::reset(self);
+        }
+        info!("wl_pointer capability: {}", wanted);
     }
 
     /// Sole owner of the advertised output's mode. Takes physical pixels,
@@ -893,6 +952,7 @@ impl CompositorHandler for TawcState {
         self.sync_desktop_hosts();
         self.buffer_commit_pending = true;
 
+        crate::cursor::after_commit(self, surface);
         crate::gtk3_menus_workaround::after_commit(self, surface);
     }
 }
@@ -1137,10 +1197,15 @@ impl SeatHandler for TawcState {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        crate::cursor::set_status(self, image);
     }
 }
+
+// tawc has no zwp_tablet_v2 seat; this exists only because
+// wp_cursor_shape_v1's device dispatch is shared with tablet tools.
+impl TabletSeatHandler for TawcState {}
 
 // ---------------------------------------------------------------------------
 // Client state + delegate macros

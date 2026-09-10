@@ -15,7 +15,8 @@
 //! Tap / cursor events come from [`inject_touch`] / [`inject_touch_logical`],
 //! which dispatch MotionEvents through the focused SurfaceView (at a stable
 //! Wayland logical coordinate for the latter). Not an IC bypass — touches
-//! don't go through the IC in production either.
+//! don't go through the IC in production either. The `inject_pointer_*`
+//! helpers do the same for real mouse input, with `SOURCE_MOUSE` events.
 
 use std::io;
 use std::process::{Command, Output};
@@ -668,16 +669,63 @@ pub fn inject_touch_logical(x: f32, y: f32) -> io::Result<Output> {
 }
 
 fn inject_touch_inner(args: &[(&str, &str)]) -> io::Result<Output> {
+    inject_input_inner("inject-touch", args)
+}
+
+/// Move the mouse to the same normalized point [`inject_touch`] taps, as an
+/// `ACTION_HOVER_MOVE`. The debug-app scenes are built around that point.
+/// (The `inject-pointer` broker action also takes Wayland logical `x`/`y`,
+/// like `tap-logical`, for tests that drive real apps.)
+pub fn inject_pointer_move() -> io::Result<Output> {
+    inject_pointer_inner(&[("kind", "move")])
+}
+
+/// Click `button` (`primary`, `secondary`, `tertiary`, `back`, `forward`) at
+/// the normalized point. Injects Android's full mouse click shape, the
+/// synthesized hover exit/enter around it included.
+pub fn inject_pointer_click(button: &str) -> io::Result<Output> {
+    inject_pointer_inner(&[("kind", "button"), ("button", button)])
+}
+
+/// Turn the wheel by `detents` at the normalized point. Positive is Android's
+/// `AXIS_VSCROLL` direction (away from the user), which the compositor flips
+/// into Wayland's positive-down vertical axis.
+pub fn inject_pointer_scroll(detents: f32) -> io::Result<Output> {
+    let amount = format!("{detents:.2}");
+    inject_pointer_inner(&[("kind", "scroll"), ("amount", &amount)])
+}
+
+/// Horizontal wheel equivalent of [`inject_pointer_scroll`]. Positive is
+/// rightward on both sides, so no sign flip happens.
+pub fn inject_pointer_hscroll(detents: f32) -> io::Result<Output> {
+    let amount = format!("{detents:.2}");
+    inject_pointer_inner(&[("kind", "hscroll"), ("amount", &amount)])
+}
+
+/// Inject a bare `ACTION_HOVER_EXIT`. Android synthesizes one before every
+/// mouse press, and it must not become a `wl_pointer.leave`.
+pub fn inject_pointer_hover_exit() -> io::Result<Output> {
+    inject_pointer_inner(&[("kind", "hover-exit")])
+}
+
+fn inject_pointer_inner(args: &[(&str, &str)]) -> io::Result<Output> {
+    inject_input_inner("inject-pointer", args)
+}
+
+/// Shared retry loop for the injection actions. The focused Activity can
+/// still be coming up right after a client window appears, so retry briefly
+/// on that specific error instead of failing the test.
+fn inject_input_inner(action: &str, args: &[(&str, &str)]) -> io::Result<Output> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let output = broker_action_raw("inject-touch", args)?;
+        let output = broker_action_raw(action, args)?;
         if output.status.success() {
             return Ok(output);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.contains("no focused CompositorActivity") || Instant::now() >= deadline {
             return Err(io::Error::other(format!(
-                "broker action inject-touch failed with {} stdout={:?} stderr={:?}",
+                "broker action {action} failed with {} stdout={:?} stderr={:?}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 stderr

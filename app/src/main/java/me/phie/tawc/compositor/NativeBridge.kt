@@ -2,9 +2,11 @@ package me.phie.tawc.compositor
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.PointerIcon
 import android.view.Surface
 import android.view.inputmethod.EditorInfo
 import androidx.core.net.toUri
@@ -162,6 +164,35 @@ object NativeBridge {
      *  the compositor. The activityId tags the event so the compositor
      *  can route it to the right host's foreground toplevel. */
     external fun nativeOnTouchEvent(activityId: String, action: Int, pointerId: Int, x: Float, y: Float, eventTime: Long)
+
+    /** Forward a real pointer (mouse) event from an Activity's SurfaceView.
+     *  Mouse-source MotionEvents never go down [nativeOnTouchEvent]; see
+     *  notes/input.md for the source split.
+     *
+     *  `kind` is 0 = motion, 1 = button, 2 = axis. `button` is a single
+     *  `MotionEvent.BUTTON_*` bit (mapped to evdev `BTN_*` natively),
+     *  `vscroll`/`hscroll` are raw `AXIS_VSCROLL`/`AXIS_HSCROLL` detents
+     *  (native applies the Wayland sign and units), `fromTouchpad` picks
+     *  `wl_pointer.axis_source`, and `stop` marks the end of a touchpad
+     *  scroll gesture. */
+    external fun nativeOnPointerEvent(
+        activityId: String,
+        kind: Int,
+        x: Float,
+        y: Float,
+        button: Int,
+        pressed: Boolean,
+        vscroll: Float,
+        hscroll: Float,
+        fromTouchpad: Boolean,
+        stop: Boolean,
+        eventTime: Long,
+    )
+
+    /** Tell the compositor whether any mouse-class InputDevice is attached.
+     *  Drives one of the two reasons the seat advertises `wl_pointer`.
+     *  Pushed by [MouseWatcher]. */
+    external fun nativeOnMouseAttachedChanged(attached: Boolean)
 
     /** Forward an Activity window-focus change. The compositor uses this
      *  to track `foreground_host`; phase 7 will use the same hook to
@@ -368,6 +399,96 @@ object NativeBridge {
             service.setWindowFullscreen(activityId, fullscreen)
             service.getActivity(activityId)?.setFullscreenFromCompositor(fullscreen)
         }
+    }
+
+    /**
+     * Called from native when a client sets a named cursor shape
+     * (`wp_cursor_shape_v1`, or a `wl_pointer.set_cursor` we could not turn
+     * into a bitmap). [shape] is a CSS/cursor-shape-v1 name; the empty string
+     * hides the cursor.
+     *
+     * Android draws the pointer sprite itself when a real mouse is attached,
+     * so tawc maps the request onto the SurfaceView's PointerIcon rather than
+     * rendering a second cursor into the Wayland scene. `View.setPointerIcon`
+     * must run on the UI thread.
+     */
+    @JvmStatic
+    fun setPointerIcon(activityId: String, shape: String) {
+        val type = pointerIconTypeFor(shape)
+        mainHandler.post {
+            val activity = serviceRef?.get()?.getActivity(activityId) ?: return@post
+            activity.setPointerIconFromCompositor(PointerIcon.getSystemIcon(activity, type))
+        }
+    }
+
+    /**
+     * Called from native with a client-drawn cursor image, packed
+     * `ARGB_8888` row-major. Used by legacy `wl_pointer.set_cursor` clients —
+     * Xwayland is the main one.
+     */
+    @JvmStatic
+    fun setPointerIconBitmap(
+        activityId: String,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        hotspotX: Int,
+        hotspotY: Int,
+    ) {
+        if (width <= 0 || height <= 0 || pixels.size < width * height) {
+            Log.w(TAG, "setPointerIconBitmap: bad ${width}x$height for ${pixels.size} pixels")
+            return
+        }
+        val bitmap = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+        mainHandler.post {
+            val activity = serviceRef?.get()?.getActivity(activityId) ?: return@post
+            val icon = runCatching {
+                PointerIcon.create(bitmap, hotspotX.toFloat(), hotspotY.toFloat())
+            }.getOrNull()
+            if (icon == null) {
+                Log.w(TAG, "setPointerIconBitmap: PointerIcon.create rejected the bitmap")
+                return@post
+            }
+            activity.setPointerIconFromCompositor(icon)
+        }
+    }
+
+    /**
+     * `wp_cursor_shape_v1` / CSS cursor name to the closest Android
+     * `PointerIcon` system type. Android has no sprite for several shapes
+     * (`cell`, `dnd-*`, the single-direction resizes), so those collapse onto
+     * the nearest one that exists.
+     */
+    private fun pointerIconTypeFor(shape: String): Int = when (shape) {
+        "" -> PointerIcon.TYPE_NULL
+        "default" -> PointerIcon.TYPE_ARROW
+        "context-menu" -> PointerIcon.TYPE_CONTEXT_MENU
+        "help" -> PointerIcon.TYPE_HELP
+        "pointer" -> PointerIcon.TYPE_HAND
+        "progress", "wait" -> PointerIcon.TYPE_WAIT
+        "cell" -> PointerIcon.TYPE_CELL
+        "crosshair" -> PointerIcon.TYPE_CROSSHAIR
+        "text" -> PointerIcon.TYPE_TEXT
+        "vertical-text" -> PointerIcon.TYPE_VERTICAL_TEXT
+        "alias" -> PointerIcon.TYPE_ALIAS
+        "copy" -> PointerIcon.TYPE_COPY
+        "move" -> PointerIcon.TYPE_ALL_SCROLL
+        "no-drop" -> PointerIcon.TYPE_NO_DROP
+        "not-allowed" -> PointerIcon.TYPE_NO_DROP
+        "grab" -> PointerIcon.TYPE_GRAB
+        "grabbing" -> PointerIcon.TYPE_GRABBING
+        "e-resize", "w-resize", "ew-resize", "col-resize" ->
+            PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW
+        "n-resize", "s-resize", "ns-resize", "row-resize" ->
+            PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW
+        "ne-resize", "sw-resize", "nesw-resize" ->
+            PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW
+        "nw-resize", "se-resize", "nwse-resize" ->
+            PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW
+        "all-scroll" -> PointerIcon.TYPE_ALL_SCROLL
+        "zoom-in" -> PointerIcon.TYPE_ZOOM_IN
+        "zoom-out" -> PointerIcon.TYPE_ZOOM_OUT
+        else -> PointerIcon.TYPE_ARROW
     }
 
     @JvmStatic

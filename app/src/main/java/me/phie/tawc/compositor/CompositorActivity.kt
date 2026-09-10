@@ -17,6 +17,7 @@ import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -55,6 +56,19 @@ import java.io.File
 class CompositorActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var rootView: FrameLayout
     private lateinit var surfaceView: SurfaceView
+
+    /** Last mouse button mask seen from a mouse-source MotionEvent. Android
+     *  reports a bitmask rather than per-button actions, so press/release
+     *  events come from diffing this. */
+    private var mouseButtonState = 0
+
+    /** Ends a touchpad scroll gesture with an `axis_stop` frame. */
+    private val scrollStopRunnable = Runnable {
+        NativeBridge.nativeOnPointerEvent(
+            activityId, POINTER_KIND_AXIS, 0f, 0f,
+            0, false, 0f, 0f, true, true, SystemClock.uptimeMillis(),
+        )
+    }
     /** Set in onCreate from intent.data. Always non-null at runtime —
      *  the only path that creates this Activity is the spawnActivity
      *  reverse-JNI call, which always sets a `tawc://activity/<id>` URI. */
@@ -108,7 +122,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         CompositorService.ensureRunning(this)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        surfaceView = TawcSurfaceView(this, activityId)
+        surfaceView = TawcSurfaceView(this)
         rootView = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(surfaceView, FrameLayout.LayoutParams(
@@ -135,6 +149,7 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         if (initialized) {
+            surfaceView.removeCallbacks(scrollStopRunnable)
             unregisterBackCallback()
             metadataScope.cancel()
             if (NativeBridge.activeInputConnection?.targetsView(surfaceView) == true) {
@@ -360,11 +375,11 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
      * Custom SurfaceView that provides our InputConnection to the IME.
      * This makes the view act as a text input target for Gboard.
      */
-    private class TawcSurfaceView(
-        context: Context,
-        private val activityId: String,
-    ) : SurfaceView(context) {
+    private inner class TawcSurfaceView(context: Context) : SurfaceView(context) {
         override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+            if (swallowMouseButtonKey(event)) {
+                return true
+            }
             if (dispatchHardwareKeyToCompositor(event)) {
                 return true
             }
@@ -372,10 +387,46 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         }
 
         override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+            if (swallowMouseButtonKey(event)) {
+                return true
+            }
             if (dispatchHardwareKeyToCompositor(event)) {
                 return true
             }
             return super.onKeyUp(keyCode, event)
+        }
+
+        /** Android raises `KEYCODE_BACK`/`KEYCODE_FORWARD` alongside the
+         *  mouse side buttons. Those already went out as `BTN_SIDE`/
+         *  `BTN_EXTRA`, so consume the key here — otherwise a mouse Back
+         *  click would also run the Android Back policy (dismiss popup /
+         *  leave fullscreen / send Escape). */
+        private fun swallowMouseButtonKey(event: KeyEvent): Boolean =
+            event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+                (event.keyCode == KeyEvent.KEYCODE_BACK ||
+                    event.keyCode == KeyEvent.KEYCODE_FORWARD)
+
+        /** Wheel (`ACTION_SCROLL`) and mouse button press/release actions
+         *  arrive here rather than through the touch listener. */
+        override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+            if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+                dispatchPointerToCompositor(event)
+            ) {
+                return true
+            }
+            return super.onGenericMotionEvent(event)
+        }
+
+        /** Android routes hover actions here first and only falls through to
+         *  [onGenericMotionEvent] if this returns false, so hook it
+         *  explicitly rather than relying on the fall-through. */
+        override fun onHoverEvent(event: MotionEvent): Boolean {
+            if (event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+                dispatchPointerToCompositor(event)
+            ) {
+                return true
+            }
+            return super.onHoverEvent(event)
         }
 
         override fun onCheckIsTextEditor(): Boolean = true
@@ -404,6 +455,20 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun dispatchTouchToCompositor(event: MotionEvent): Boolean {
+        // Source split. A mouse click reaches the touch listener as
+        // ACTION_DOWN/MOVE/UP, so without this a single click would deliver
+        // both a wl_touch.down and a wl_pointer.button and clients would
+        // double-handle it. Stylus deliberately stays on touch — a real
+        // zwp_tablet_v2 path is out of scope. Anything else (rotary
+        // encoders, gamepads) is not ours.
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            return dispatchPointerToCompositor(event)
+        }
+        if (!event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) &&
+            !event.isFromSource(InputDevice.SOURCE_STYLUS)
+        ) {
+            return false
+        }
         val actionMasked = event.actionMasked
         when (actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
@@ -438,6 +503,104 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         return true
+    }
+
+    /** Apply a cursor the compositor derived from the client's cursor
+     *  request. Android draws the sprite; tawc never renders one itself. */
+    fun setPointerIconFromCompositor(icon: PointerIcon) {
+        if (!initialized) return
+        surfaceView.pointerIcon = icon
+    }
+
+    /**
+     * Translate one mouse-source [MotionEvent] into `wl_pointer` events.
+     *
+     * Motion and button state both arrive on the same events: moves with a
+     * button held come through the touch listener as ACTION_MOVE, moves
+     * without one come through [TawcSurfaceView.onHoverEvent]. Android
+     * reports buttons as a bitmask rather than per-button actions, so
+     * presses and releases come from diffing that mask —
+     * ACTION_BUTTON_PRESS/RELEASE are ignored because the diff already
+     * covers them.
+     *
+     * ACTION_HOVER_EXIT is deliberately dropped, not mapped to
+     * `wl_pointer.leave`: Android synthesizes one before every mouse
+     * ACTION_DOWN (and a HOVER_ENTER after the matching UP), and wrapping
+     * every click in leave/enter closes GTK menus and breaks drags. Real
+     * leaves come from the compositor on focus loss / surface destroy.
+     */
+    private fun dispatchPointerToCompositor(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                sendPointerMotion(event)
+                // A mouse ACTION_DOWN unambiguously means a button went
+                // down, but not every producer fills in the mask: Android's
+                // own `input mouse motionevent DOWN` injector leaves
+                // buttonState at 0. Real hardware always sets it; assume the
+                // primary button when it doesn't, so a click is never
+                // silently dropped.
+                syncMouseButtons(
+                    event,
+                    event.buttonState.takeIf { it != 0 } ?: MotionEvent.BUTTON_PRIMARY,
+                )
+            }
+            MotionEvent.ACTION_MOVE,
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_HOVER_ENTER,
+            MotionEvent.ACTION_HOVER_MOVE -> {
+                sendPointerMotion(event)
+                syncMouseButtons(event, event.buttonState)
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> Unit
+            MotionEvent.ACTION_CANCEL -> syncMouseButtons(event, 0)
+            MotionEvent.ACTION_SCROLL -> {
+                sendPointerMotion(event)
+                sendPointerScroll(event)
+            }
+            else -> return false
+        }
+        return true
+    }
+
+    private fun sendPointerMotion(event: MotionEvent) {
+        NativeBridge.nativeOnPointerEvent(
+            activityId, POINTER_KIND_MOTION, event.x, event.y,
+            0, false, 0f, 0f, false, false, event.eventTime,
+        )
+    }
+
+    /** Emit one button event per bit that changed since the last event. */
+    private fun syncMouseButtons(event: MotionEvent, rawMask: Int) {
+        val mask = rawMask and MOUSE_BUTTON_MASK
+        var changed = mask xor mouseButtonState
+        if (changed == 0) return
+        mouseButtonState = mask
+        while (changed != 0) {
+            val bit = changed and -changed
+            changed = changed and bit.inv()
+            NativeBridge.nativeOnPointerEvent(
+                activityId, POINTER_KIND_BUTTON, event.x, event.y,
+                bit, (mask and bit) != 0, 0f, 0f, false, false, event.eventTime,
+            )
+        }
+    }
+
+    private fun sendPointerScroll(event: MotionEvent) {
+        val vscroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+        val hscroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+        if (vscroll == 0f && hscroll == 0f) return
+        // A touchpad scroll is a finger gesture, not wheel detents. GTK only
+        // settles its kinetic scrolling on the axis_stop that ends one, and
+        // Android has no gesture-end event, so time it out.
+        val fromTouchpad = event.device?.supportsSource(InputDevice.SOURCE_TOUCHPAD) == true
+        NativeBridge.nativeOnPointerEvent(
+            activityId, POINTER_KIND_AXIS, event.x, event.y,
+            0, false, vscroll, hscroll, fromTouchpad, false, event.eventTime,
+        )
+        surfaceView.removeCallbacks(scrollStopRunnable)
+        if (fromTouchpad) {
+            surfaceView.postDelayed(scrollStopRunnable, SCROLL_STOP_DELAY_MS)
+        }
     }
 
     /**
@@ -594,9 +757,124 @@ class CompositorActivity : Activity(), SurfaceHolder.Callback {
         return null
     }
 
+    /**
+     * Debug-broker mouse injection (`inject-pointer`). Builds real
+     * `SOURCE_MOUSE` MotionEvents and dispatches them through the
+     * SurfaceView, so the Activity's own decoding — the source split, the
+     * button-mask diff, the hover rules — is what the test exercises.
+     *
+     * `kind`:
+     *  - `move` — one hover move
+     *  - `button` — Android's full click sequence for `button` (default
+     *    `primary`): HOVER_EXIT, DOWN, BUTTON_PRESS, BUTTON_RELEASE, UP,
+     *    HOVER_ENTER. The hover events are part of the shape on purpose:
+     *    they are what a click must *not* turn into a leave/enter pair.
+     *  - `scroll` / `hscroll` — one ACTION_SCROLL of `amount` detents
+     *  - `hover-exit` — a bare HOVER_EXIT
+     *
+     * Coordinates are Wayland logical, like `inject-touch`'s `tap-logical`.
+     */
+    fun injectPointerSequenceForDev(
+        kind: String,
+        logicalX: Float? = null,
+        logicalY: Float? = null,
+        button: String? = null,
+        amount: Float = 1f,
+    ): String? {
+        val width = surfaceView.width.toFloat()
+        val height = surfaceView.height.toFloat()
+        if (width <= 0f || height <= 0f) {
+            return "surfaceView has no size yet (${surfaceView.width}x${surfaceView.height})"
+        }
+
+        val x = logicalX?.let { it * Settings.outputScale } ?: (0.30f * width)
+        val y = logicalY?.let { it * Settings.outputScale } ?: (0.35f * height)
+
+        val buttonBit = when (button ?: "primary") {
+            "primary" -> MotionEvent.BUTTON_PRIMARY
+            "secondary" -> MotionEvent.BUTTON_SECONDARY
+            "tertiary" -> MotionEvent.BUTTON_TERTIARY
+            "back" -> MotionEvent.BUTTON_BACK
+            "forward" -> MotionEvent.BUTTON_FORWARD
+            else -> return "unknown button '$button'"
+        }
+
+        val downTime = SystemClock.uptimeMillis()
+        var eventTime = downTime
+
+        fun send(action: Int, buttonState: Int, vscroll: Float, hscroll: Float) {
+            eventTime += 16
+            val props = arrayOf(
+                MotionEvent.PointerProperties().apply {
+                    id = 0
+                    toolType = MotionEvent.TOOL_TYPE_MOUSE
+                },
+            )
+            val coords = arrayOf(
+                MotionEvent.PointerCoords().apply {
+                    this.x = x
+                    this.y = y
+                    if (vscroll != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vscroll)
+                    if (hscroll != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, hscroll)
+                },
+            )
+            val event = MotionEvent.obtain(
+                downTime, eventTime, action, 1, props, coords,
+                0, buttonState, 1f, 1f, 0, 0,
+                InputDevice.SOURCE_MOUSE, 0,
+            )
+            try {
+                // Android splits pointer dispatch the same way: DOWN/MOVE/UP
+                // go to the touch path, everything else (hover, scroll,
+                // button press/release) to generic motion.
+                when (action) {
+                    MotionEvent.ACTION_DOWN,
+                    MotionEvent.ACTION_MOVE,
+                    MotionEvent.ACTION_UP,
+                    MotionEvent.ACTION_CANCEL -> surfaceView.dispatchTouchEvent(event)
+                    else -> surfaceView.dispatchGenericMotionEvent(event)
+                }
+            } finally {
+                event.recycle()
+            }
+        }
+
+        when (kind) {
+            "move" -> send(MotionEvent.ACTION_HOVER_MOVE, 0, 0f, 0f)
+            "hover-exit" -> send(MotionEvent.ACTION_HOVER_EXIT, 0, 0f, 0f)
+            "button" -> {
+                send(MotionEvent.ACTION_HOVER_EXIT, 0, 0f, 0f)
+                send(MotionEvent.ACTION_DOWN, buttonBit, 0f, 0f)
+                send(MotionEvent.ACTION_BUTTON_PRESS, buttonBit, 0f, 0f)
+                send(MotionEvent.ACTION_BUTTON_RELEASE, 0, 0f, 0f)
+                send(MotionEvent.ACTION_UP, 0, 0f, 0f)
+                send(MotionEvent.ACTION_HOVER_ENTER, 0, 0f, 0f)
+            }
+            "scroll" -> send(MotionEvent.ACTION_SCROLL, 0, amount, 0f)
+            "hscroll" -> send(MotionEvent.ACTION_SCROLL, 0, 0f, amount)
+            else -> return "unknown pointer sequence '$kind'"
+        }
+
+        return null
+    }
+
     companion object {
         private const val TAG = "tawc"
         private const val TASK_ICON_SIZE_DP = 96
+
+        // NativeBridge.nativeOnPointerEvent `kind` values.
+        private const val POINTER_KIND_MOTION = 0
+        private const val POINTER_KIND_BUTTON = 1
+        private const val POINTER_KIND_AXIS = 2
+
+        /** The five mouse buttons the compositor maps to evdev `BTN_*`. */
+        private const val MOUSE_BUTTON_MASK =
+            MotionEvent.BUTTON_PRIMARY or MotionEvent.BUTTON_SECONDARY or
+                MotionEvent.BUTTON_TERTIARY or MotionEvent.BUTTON_BACK or
+                MotionEvent.BUTTON_FORWARD
+
+        /** Idle gap after which a touchpad scroll gesture is considered over. */
+        private const val SCROLL_STOP_DELAY_MS = 120L
 
         private fun decodeTaskIcon(path: String, targetPx: Int): Bitmap? {
             val f = File(path)

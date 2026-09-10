@@ -5,6 +5,10 @@
 //! Briefly entering/leaving a wl_pointer at the center of each new toplevel
 //! primes GTK3's pointer-crossing state and avoids the bad cold path.
 //!
+//! The `wl_pointer` seat capability is *not* owned here — see
+//! `TawcState::sync_pointer_capability`; this module only flips its own
+//! reason.
+//!
 //! This module is intentionally isolated compatibility glue. If the workaround
 //! is removed, delete this module plus its small Settings/JNI and compositor
 //! lifecycle hooks.
@@ -13,7 +17,6 @@ use std::collections::HashSet;
 
 use log::info;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
-use smithay::input::{Seat, SeatHandler};
 use smithay::input::pointer::MotionEvent as PointerMotionEvent;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -21,12 +24,6 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
 use crate::compositor::TawcState;
-
-pub(crate) fn init_seat<D: SeatHandler + 'static>(seat: &mut Seat<D>, enabled: bool) {
-    if enabled {
-        seat.add_pointer();
-    }
-}
 
 pub(crate) struct State {
     pub(crate) enabled: bool,
@@ -48,12 +45,11 @@ pub(crate) fn set_enabled(data: &mut TawcState, enabled: bool) {
     }
 
     data.gtk3_broken_menus_workaround.enabled = enabled;
-    if enabled {
-        data.seat.add_pointer();
-    } else {
-        data.seat.remove_pointer();
+    if !enabled {
         data.gtk3_broken_menus_workaround.primed.clear();
     }
+    // The seat capability has one owner; this is only one of its reasons.
+    data.sync_pointer_capability();
     info!("GTK3 broken menus workaround changed: {}", enabled);
 }
 
@@ -130,11 +126,20 @@ fn prime_toplevel(data: &mut TawcState, surface: &WlSurface, width: i32, height:
         },
     );
     pointer.frame(data);
+    // Finish by putting the pointer back where it was. An unconditional
+    // leave here would yank a real mouse out of the surface it is hovering
+    // every time a new toplevel commits its first buffer.
+    let restore = data.pointer_focus.clone();
+    let restore_location = if restore.is_some() {
+        data.pointer_location
+    } else {
+        location
+    };
     pointer.motion(
         data,
-        None,
+        restore,
         &PointerMotionEvent {
-            location,
+            location: restore_location,
             serial: SERIAL_COUNTER.next_serial(),
             time,
         },

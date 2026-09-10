@@ -30,6 +30,7 @@ mod protocol;
 mod wlegl;
 mod clipboard;
 mod compositor;
+mod cursor;
 mod desktop;
 mod render;
 mod scale;
@@ -205,6 +206,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     // the compositor thread's `create_*_channel` calls and silently
     // drop.
     let touch_channel = input::create_touch_channel();
+    let pointer_channel = input::create_pointer_channel();
     let text_input_channel = text_input::create_text_input_channel();
     let clipboard_channel = clipboard::create_clipboard_channel();
     let surface_event_channel = host::create_surface_event_channel();
@@ -219,6 +221,7 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeStartComp
     std::thread::spawn(move || {
         if let Err(e) = run_compositor(
             touch_channel,
+            pointer_channel,
             text_input_channel,
             clipboard_channel,
             surface_event_channel,
@@ -405,6 +408,105 @@ pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnTouchEv
         _ => return,
     };
     input::send_touch_event(event);
+}
+
+/// Pointer (real mouse) events from `CompositorActivity`. Android-specific
+/// constants and unit conversion live here so Kotlin only has to classify
+/// and forward; see notes/input.md ("Pointer Input").
+///
+/// `kind`: 0 = motion, 1 = button, 2 = axis.
+/// `button` is an Android `MotionEvent.BUTTON_*` bit; `vscroll`/`hscroll`
+/// are raw `AXIS_VSCROLL`/`AXIS_HSCROLL` values in wheel detents.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnPointerEvent(
+    mut env: JNIEnv,
+    _class: JClass,
+    activity_id: JString,
+    kind: i32,
+    x: f32,
+    y: f32,
+    button: i32,
+    pressed: bool,
+    vscroll: f32,
+    hscroll: f32,
+    from_touchpad: bool,
+    stop: bool,
+    event_time: i64,
+) {
+    const KIND_MOTION: i32 = 0;
+    const KIND_BUTTON: i32 = 1;
+    const KIND_AXIS: i32 = 2;
+
+    // Android MotionEvent.BUTTON_* -> linux/input-event-codes.h BTN_*.
+    const BUTTON_PRIMARY: i32 = 1 << 0;
+    const BUTTON_SECONDARY: i32 = 1 << 1;
+    const BUTTON_TERTIARY: i32 = 1 << 2;
+    const BUTTON_BACK: i32 = 1 << 3;
+    const BUTTON_FORWARD: i32 = 1 << 4;
+
+    // One wheel detent is AXIS_VSCROLL == 1.0, and one detent is 120 in
+    // wl_pointer.axis_value120. The legacy `axis` value is in logical
+    // pixels; 15 per detent matches libinput's wheel-click angle, which is
+    // what desktop clients are tuned against. Deliberately not
+    // ViewConfiguration.getScaledVerticalScrollFactor(), which is in
+    // density-scaled physical pixels and would make scroll distance depend
+    // on the phone.
+    const LOGICAL_PX_PER_DETENT: f64 = 15.0;
+
+    let activity_id = jstring_to_id(&mut env, activity_id);
+    let time = event_time as u32;
+    let event = match kind {
+        KIND_MOTION => input::PointerEvent::Motion { x, y, time, activity_id },
+        KIND_BUTTON => {
+            let code = match button {
+                BUTTON_PRIMARY => 0x110,   // BTN_LEFT
+                BUTTON_SECONDARY => 0x111, // BTN_RIGHT
+                BUTTON_TERTIARY => 0x112,  // BTN_MIDDLE
+                BUTTON_BACK => 0x113,      // BTN_SIDE
+                BUTTON_FORWARD => 0x114,   // BTN_EXTRA
+                _ => return,
+            };
+            input::PointerEvent::Button { code, pressed, time, activity_id }
+        }
+        KIND_AXIS => {
+            // Android AXIS_VSCROLL is positive scrolling away from the user;
+            // Wayland's vertical axis is positive downward. Negate vertical
+            // only — AXIS_HSCROLL is already positive-right. No "natural
+            // scrolling" inversion here; that is the client's business.
+            let v = vscroll as f64;
+            let h = hscroll as f64;
+            input::PointerEvent::Axis {
+                dx: h * LOGICAL_PX_PER_DETENT,
+                dy: -v * LOGICAL_PX_PER_DETENT,
+                v120_x: (h * 120.0).round() as i32,
+                v120_y: (-v * 120.0).round() as i32,
+                source: if from_touchpad {
+                    input::PointerAxisSource::Finger
+                } else {
+                    input::PointerAxisSource::Wheel
+                },
+                stop,
+                time,
+                activity_id,
+            }
+        }
+        _ => return,
+    };
+    input::send_pointer_event(event);
+}
+
+/// Android told us whether any mouse-class `InputDevice` is attached. Drives
+/// one of the two reasons the seat advertises `wl_pointer` — see
+/// `compositor::PointerCapability`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_me_phie_tawc_compositor_NativeBridge_nativeOnMouseAttachedChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    attached: bool,
+) {
+    info!("nativeOnMouseAttachedChanged({})", attached);
+    host::send_surface_event(SurfaceEvent::MouseAttachedChanged { attached });
 }
 
 #[unsafe(no_mangle)]
@@ -909,6 +1011,56 @@ pub fn set_activity_fullscreen_from_native(activity_id: &str, fullscreen: bool) 
     });
 }
 
+/// Reverse-JNI: set the Android `PointerIcon` for one compositor Activity's
+/// SurfaceView. `shape` is a CSS/`cursor-shape-v1` name (`default`, `text`,
+/// `ew-resize`, …); the empty string means "hide the cursor". Kotlin owns the
+/// name → `PointerIcon` constant mapping.
+pub fn set_pointer_icon_from_native(activity_id: &str, shape: &str) {
+    with_native_bridge("setPointerIcon", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        let shape_jstr = env.new_string(shape)?;
+        env.call_static_method(
+            class,
+            "setPointerIcon",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[(&id_jstr).into(), (&shape_jstr).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Reverse-JNI: set a client-drawn cursor bitmap as the Activity's
+/// `PointerIcon`. `pixels` is packed `ARGB_8888`, row-major, `width * height`
+/// entries. Used for legacy `wl_pointer.set_cursor` surfaces (Xwayland).
+pub fn set_pointer_icon_bitmap_from_native(
+    activity_id: &str,
+    pixels: &[i32],
+    width: i32,
+    height: i32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+) {
+    with_native_bridge("setPointerIconBitmap", |env, class| {
+        let id_jstr = env.new_string(activity_id)?;
+        let array = env.new_int_array(pixels.len() as i32)?;
+        env.set_int_array_region(&array, 0, pixels)?;
+        env.call_static_method(
+            class,
+            "setPointerIconBitmap",
+            "(Ljava/lang/String;[IIIII)V",
+            &[
+                (&id_jstr).into(),
+                (&array).into(),
+                JValue::Int(width),
+                JValue::Int(height),
+                JValue::Int(hotspot_x),
+                JValue::Int(hotspot_y),
+            ],
+        )?;
+        Ok(())
+    });
+}
+
 /// Reverse-JNI: update Android recents/task metadata for one compositor
 /// Activity. Kotlin decodes the PNG path off the UI thread and falls
 /// back to TAWC's app icon if no rootfs icon was found.
@@ -973,6 +1125,7 @@ fn sanitize_output_scale(scale: f64) -> Option<f64> {
 /// when an Activity calls `nativeRegisterActivitySurface`.
 fn run_compositor(
     touch_channel: smithay::reexports::calloop::channel::Channel<input::TouchEvent>,
+    pointer_channel: smithay::reexports::calloop::channel::Channel<input::PointerEvent>,
     text_input_channel: smithay::reexports::calloop::channel::Channel<text_input::TextInputEvent>,
     clipboard_channel: smithay::reexports::calloop::channel::Channel<clipboard::ClipboardEvent>,
     surface_event_channel: smithay::reexports::calloop::channel::Channel<SurfaceEvent>,
@@ -1055,7 +1208,8 @@ fn run_compositor(
     }
     event_loop::run(
         wl_display, state, &wayland_socket_path,
-        touch_channel, text_input_channel, clipboard_channel, state_query_channel, surface_event_channel,
+        touch_channel, pointer_channel, text_input_channel, clipboard_channel, state_query_channel,
+        surface_event_channel,
         &RUNNING,
     )
 }

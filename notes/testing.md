@@ -42,6 +42,7 @@ prerequisites are. As of writing the modules are:
 | `xwayland`      | mixed       | Anything that drives the bionic-built Xwayland binary. Pure-X11 SHM smoke uses `cpu` and runs on x86; TAWC-DRI AHB round-trips and libhybris's X11 EGL plugin use `libhybris` and are skipped on x86 devices. |
 | `text_input`    | `cpu`       | wayland-debug-app text-input-v3, wl_keyboard, clipboard, and cursor-tap coverage. Buffer type is irrelevant. |
 | `touch_input`   | `cpu`       | wayland-debug-app wl_touch routing coverage, including subsurfaces and popups. Buffer type is irrelevant. |
+| `pointer_input` | `cpu`       | wayland-debug-app wl_pointer coverage: the mouse/touch source split, button codes, scroll direction and units, frames, focus targets, and the hover-exit-is-not-leave rule. Buffer type is irrelevant. |
 | `settings`      | `cpu`       | Runtime settings coverage: output scale, configure-state policy, and GTK3 broken menus workaround. |
 | `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
 | `uninstall_wipe` | n/a        | Wipe-engine edge cases against a *fabricated* KB-scale slot (mount gate, su-retry ladder). Rooted target only. |
@@ -64,7 +65,8 @@ in `libhybris::` call `RootfsProcess::spawn_with(GraphicsBackend::Libhybris, …
 (and the corresponding `launch_and_wait_for_*` / `assert_renders_via_*`
 variants), `libhybris_zink::` pins `LibhybrisZink`, `gfxstream::` pins
 `Gfxstream`, `cpu_graphics::` / `apps::` / `settings::` /
-`text_input::` / `touch_input::` pin `Cpu`, and `xwayland::` uses
+`text_input::` / `touch_input::` / `pointer_input::` pin `Cpu`, and
+`xwayland::` uses
 `Cpu` for pure-X11 SHM plus `Libhybris` for AHB/EGL-on-X11. The
 broker carries the override through to `InstallationMethod.startInside`
 on every spawn (`GRAPHICS <key>` header on RUNINSIDE, see
@@ -107,7 +109,17 @@ TAWC_DEBUG:CURSOR_POS:<offset>      Cursor position (character offset)
 TAWC_DEBUG:PREEDIT:<text>           Current composing/preedit string
 TAWC_DEBUG:KEY:<name>               Keyboard event observed by the client
 TAWC_DEBUG:TOUCH_DOWN:<id>:<x>:<y>:<active>
+TAWC_DEBUG:POINTER_ENTER:<target>:<x>:<y>     Also POINTER_MOTION, POINTER_LEAVE
+TAWC_DEBUG:POINTER_BUTTON:<target>:<code>:<state>
+TAWC_DEBUG:POINTER_AXIS:<v|h>:<value>         Also POINTER_AXIS_V120, _STOP
+TAWC_DEBUG:POINTER_AXIS_SOURCE:<enum>
+TAWC_DEBUG:POINTER_FRAME
 ```
+
+The client binds `wl_seat` at version 9, so `wl_pointer` reaches
+`axis_value120` / `axis_relative_direction` and `wl_touch` reaches
+`shape` / `orientation`. Every listener slot must stay filled — libwayland
+dereferences missing ones.
 
 ### Commands
 
@@ -232,6 +244,11 @@ Host (cargo test)                    Phone
   │                                    │         └─ GtkGestureMultiPress
   │                                    │           └─ cursor move
   │     └─ TAWC_DEBUG:CURSOR_POS ←─────┤
+  │                                    │
+  ├─ broker action inject-pointer ─────┤──→ SurfaceView dispatch (SOURCE_MOUSE)
+  │                                    │     └─ nativeOnPointerEvent
+  │                                    │       └─ wl_pointer
+  │     └─ TAWC_DEBUG:POINTER_* ←──────┤
   │                                    │
   └─ assert text/cursor == expected    │
 ```

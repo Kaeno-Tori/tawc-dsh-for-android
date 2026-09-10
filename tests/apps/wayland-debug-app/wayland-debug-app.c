@@ -312,6 +312,10 @@ struct app {
     int redraw_pending;
     struct main_shm_pool *main_pool;
     wl_fixed_t pointer_x;
+    /* Label of the surface the pointer is currently inside, "none" when it
+     * has left. Tagged onto every pointer event so tests can assert the
+     * target the same way they do for touch. */
+    char pointer_target[32];
     uint32_t keyboard_enter_serial;
 
     char text[MAX_TEXT];
@@ -2080,29 +2084,52 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = keyboard_repeat_info,
 };
 
+static const char *pointer_surface_label(struct app *app,
+                                         struct wl_surface *surface)
+{
+    const char *label = surface_label_for_touch(app, surface);
+    return label ? label : "none";
+}
+
+/* app is memset to zero at startup, so pointer_target reads as "" until the
+ * first enter. Normalize it so every emitted payload has a real label. */
+static const char *pointer_target(struct app *app)
+{
+    return app->pointer_target[0] ? app->pointer_target : "none";
+}
+
+static void emit_pointer_position(const char *tag, const char *label,
+                                  wl_fixed_t x, wl_fixed_t y)
+{
+    char buf[128];
+    checked_snprintf(buf, sizeof(buf), "%s:%.1f:%.1f", label,
+                     wl_fixed_to_double(x), wl_fixed_to_double(y));
+    debug_emit(tag, buf);
+}
+
 static void pointer_enter(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface,
                           wl_fixed_t surface_x, wl_fixed_t surface_y)
 {
     struct app *app = data;
-    char buf[64];
     (void)pointer;
     (void)serial;
-    (void)surface;
     app->pointer_x = surface_x;
-    checked_snprintf(buf, sizeof(buf), "%.1f:%.1f",
-                     wl_fixed_to_double(surface_x),
-                     wl_fixed_to_double(surface_y));
-    debug_emit("POINTER_ENTER", buf);
+    checked_copy(app->pointer_target, sizeof(app->pointer_target),
+                 pointer_surface_label(app, surface), "pointer target");
+    emit_pointer_position("POINTER_ENTER", pointer_target(app), surface_x,
+                          surface_y);
 }
 
 static void pointer_leave(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface)
 {
-    (void)data;
+    struct app *app = data;
     (void)pointer;
     (void)serial;
-    (void)surface;
+    debug_emit("POINTER_LEAVE", pointer_surface_label(app, surface));
+    checked_copy(app->pointer_target, sizeof(app->pointer_target), "none",
+                 "pointer target");
 }
 
 static void pointer_motion(void *data, struct wl_pointer *pointer,
@@ -2110,14 +2137,11 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
                            wl_fixed_t surface_y)
 {
     struct app *app = data;
-    char buf[64];
     (void)pointer;
     (void)time;
-    (void)surface_y;
     app->pointer_x = surface_x;
-    checked_snprintf(buf, sizeof(buf), "%.1f",
-                     wl_fixed_to_double(surface_x));
-    debug_emit("POINTER_MOTION", buf);
+    emit_pointer_position("POINTER_MOTION", pointer_target(app), surface_x,
+                          surface_y);
 }
 
 static void move_cursor_to_surface_x(struct app *app, wl_fixed_t surface_x)
@@ -2135,39 +2159,54 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
                            uint32_t state)
 {
     struct app *app = data;
+    char buf[128];
     (void)pointer;
     (void)serial;
     (void)time;
+    checked_snprintf(buf, sizeof(buf), "%s:%u:%u", pointer_target(app), button,
+                     state);
+    debug_emit("POINTER_BUTTON", buf);
+
     if (state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-    require_true(button == 0x110 || button == 0x14a,
-                 "unexpected pointer button: %u", button);
+    /* Only the primary button drives the text cursor; the text-input tests
+     * depend on that. Other buttons are reported, not fatal. */
+    if (button == 0x110 || button == 0x14a)
+        move_cursor_to_surface_x(app, app->pointer_x);
+}
 
-    move_cursor_to_surface_x(app, app->pointer_x);
+static const char *axis_name(uint32_t axis)
+{
+    return axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? "h" : "v";
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
                          uint32_t axis, wl_fixed_t value)
 {
+    char buf[64];
     (void)data;
     (void)pointer;
     (void)time;
-    (void)axis;
-    (void)value;
+    checked_snprintf(buf, sizeof(buf), "%s:%.2f", axis_name(axis),
+                     wl_fixed_to_double(value));
+    debug_emit("POINTER_AXIS", buf);
 }
 
 static void pointer_frame(void *data, struct wl_pointer *pointer)
 {
     (void)data;
     (void)pointer;
+    debug_emit("POINTER_FRAME", NULL);
 }
 
 static void pointer_axis_source(void *data, struct wl_pointer *pointer,
                                 uint32_t axis_source)
 {
+    char buf[32];
     (void)data;
     (void)pointer;
-    (void)axis_source;
+    checked_snprintf(buf, sizeof(buf), "%u", axis_source);
+    debug_emit("POINTER_AXIS_SOURCE", buf);
 }
 
 static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
@@ -2176,16 +2215,40 @@ static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
     (void)data;
     (void)pointer;
     (void)time;
-    (void)axis;
+    debug_emit("POINTER_AXIS_STOP", axis_name(axis));
 }
 
 static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
                                   uint32_t axis, int32_t discrete)
 {
+    /* v8+ clients get axis_value120 instead; kept so the listener slot is
+     * never NULL for a compositor that talks down to us. */
+    char buf[64];
     (void)data;
     (void)pointer;
-    (void)axis;
-    (void)discrete;
+    checked_snprintf(buf, sizeof(buf), "%s:%d", axis_name(axis), discrete);
+    debug_emit("POINTER_AXIS_DISCRETE", buf);
+}
+
+static void pointer_axis_value120(void *data, struct wl_pointer *pointer,
+                                  uint32_t axis, int32_t value120)
+{
+    char buf[64];
+    (void)data;
+    (void)pointer;
+    checked_snprintf(buf, sizeof(buf), "%s:%d", axis_name(axis), value120);
+    debug_emit("POINTER_AXIS_V120", buf);
+}
+
+static void pointer_axis_relative_direction(void *data,
+                                            struct wl_pointer *pointer,
+                                            uint32_t axis, uint32_t direction)
+{
+    char buf[64];
+    (void)data;
+    (void)pointer;
+    checked_snprintf(buf, sizeof(buf), "%s:%u", axis_name(axis), direction);
+    debug_emit("POINTER_AXIS_DIRECTION", buf);
 }
 
 static const struct wl_pointer_listener pointer_listener = {
@@ -2198,6 +2261,8 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_source = pointer_axis_source,
     .axis_stop = pointer_axis_stop,
     .axis_discrete = pointer_axis_discrete,
+    .axis_value120 = pointer_axis_value120,
+    .axis_relative_direction = pointer_axis_relative_direction,
 };
 
 static void touch_down(void *data, struct wl_touch *touch, uint32_t serial,
@@ -2294,12 +2359,33 @@ static void touch_cancel(void *data, struct wl_touch *touch)
     request_redraw(app);
 }
 
+static void touch_shape(void *data, struct wl_touch *touch, int32_t id,
+                        wl_fixed_t major, wl_fixed_t minor)
+{
+    (void)data;
+    (void)touch;
+    (void)id;
+    (void)major;
+    (void)minor;
+}
+
+static void touch_orientation(void *data, struct wl_touch *touch, int32_t id,
+                              wl_fixed_t orientation)
+{
+    (void)data;
+    (void)touch;
+    (void)id;
+    (void)orientation;
+}
+
 static const struct wl_touch_listener touch_listener = {
     .down = touch_down,
     .up = touch_up,
     .motion = touch_motion,
     .frame = touch_frame,
     .cancel = touch_cancel,
+    .shape = touch_shape,
+    .orientation = touch_orientation,
 };
 
 static void seat_capabilities(void *data, struct wl_seat *seat,
@@ -2365,8 +2451,11 @@ static void registry_global(void *data, struct wl_registry *registry,
                      "bind wl_subcompositor failed");
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         require_true(app->seat == NULL, "duplicate wl_seat global");
+        /* v9 so wl_pointer reaches axis_value120 / axis_relative_direction
+         * and wl_touch reaches shape / orientation. Both listener structs
+         * carry every slot — libwayland dereferences missing ones. */
         app->seat = wl_registry_bind(registry, name, &wl_seat_interface,
-                                     version >= 5 ? 5 : version);
+                                     version >= 9 ? 9 : version);
         require_true(app->seat != NULL, "bind wl_seat failed");
         wl_seat_add_listener(app->seat, &seat_listener, app);
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {

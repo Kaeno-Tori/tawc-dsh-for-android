@@ -13,11 +13,13 @@ use std::time::Duration;
 use log::{error, info};
 use smithay::reexports::wayland_server::Resource;
 
-use smithay::backend::input::TouchSlot;
-use smithay::backend::input::KeyState;
+use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState, TouchSlot};
 use smithay::desktop::{PopupManager, WindowSurfaceType};
 use smithay::desktop::PopupUngrabStrategy;
 use smithay::input::keyboard::{FilterResult, Keycode};
+use smithay::input::pointer::{
+    AxisFrame, ButtonEvent, MotionEvent as PointerMotionEvent,
+};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::calloop::channel::{Channel, Event as ChannelEvent};
 use smithay::reexports::calloop::generic::Generic;
@@ -32,7 +34,7 @@ use smithay::wayland::shell::xdg::XDG_POPUP_ROLE;
 use wayland_server::{Display, ListeningSocket};
 
 use crate::host::{ActivityId, OutputHost, SurfaceEvent};
-use crate::input::TouchEvent;
+use crate::input::{PointerAxisSource, PointerEvent, TouchEvent};
 use crate::scale::OutputScale;
 use crate::text_input::TextInputEvent;
 use crate::clipboard::ClipboardEvent;
@@ -52,7 +54,14 @@ struct TouchResolution {
     keyboard_focus: KeyboardFocusAction,
 }
 
-fn touch_focus_at(
+/// Hit-test the visible host's window stack at a compositor-space logical
+/// point. Shared by touch and pointer: both honour the visible-host guard
+/// and `WindowSurfaceType::ALL`, which respects `wl_surface.set_input_region`
+/// (Firefox/WebRender attaches render-only children with an empty region).
+///
+/// Returns the target surface and its origin in compositor space; smithay
+/// subtracts the origin before sending surface-local coordinates.
+fn surface_at(
     data: &TawcState,
     activity_id: &ActivityId,
     location: Point<f64, Logical>,
@@ -103,7 +112,7 @@ fn resolve_touch_down(
     activity_id: &ActivityId,
     location: Point<f64, Logical>,
 ) -> TouchResolution {
-    let touch_focus = touch_focus_at(data, activity_id, location);
+    let touch_focus = surface_at(data, activity_id, location);
     let popup_focus = touch_focus.as_ref().map(|(surface, _)| surface.clone());
     let keyboard_focus = match touch_focus.as_ref().map(|(surface, _)| surface) {
         Some(surface) if is_in_xdg_popup_tree(surface) => KeyboardFocusAction::Keep,
@@ -123,6 +132,47 @@ fn apply_keyboard_focus_action(data: &mut TawcState, action: KeyboardFocusAction
         KeyboardFocusAction::Set(surface) => data.set_input_focus(Some(&surface)),
         KeyboardFocusAction::Keep => {}
         KeyboardFocusAction::Clear => data.set_input_focus(None),
+    }
+}
+
+/// Send `wl_pointer.leave` and forget the pointer's focus.
+///
+/// Used where the pointer's surface stops being something the user can point
+/// at: Activity focus loss, surface destroy, host switch. Deliberately *not*
+/// wired to Android's `ACTION_HOVER_EXIT` — Android synthesizes one before
+/// every mouse `ACTION_DOWN`, and wrapping each click in leave/enter closes
+/// GTK menus and breaks drags.
+fn clear_pointer_focus(data: &mut TawcState) {
+    if data.pointer_focus.is_none() {
+        return;
+    }
+    data.pointer_focus = None;
+    let Some(pointer) = data.seat.get_pointer() else {
+        return;
+    };
+    let location = data.pointer_location;
+    let time = data.start_time.elapsed().as_millis() as u32;
+    pointer.motion(
+        data,
+        None,
+        &PointerMotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+        },
+    );
+    pointer.frame(data);
+}
+
+/// [`clear_pointer_focus`], but only when the pointer is currently inside a
+/// surface belonging to `activity_id`.
+fn clear_pointer_focus_for_host(data: &mut TawcState, activity_id: &ActivityId) {
+    let inside = data
+        .pointer_focus
+        .as_ref()
+        .is_some_and(|(surface, _)| host_for_surface(data, surface).as_ref() == Some(activity_id));
+    if inside {
+        clear_pointer_focus(data);
     }
 }
 
@@ -321,6 +371,7 @@ pub fn run(
     mut state: TawcState,
     socket_path: &str,
     touch_channel: Channel<TouchEvent>,
+    pointer_channel: Channel<PointerEvent>,
     text_input_channel: Channel<TextInputEvent>,
     clipboard_channel: Channel<ClipboardEvent>,
     state_query_channel: Channel<mpsc::Sender<String>>,
@@ -433,7 +484,7 @@ pub fn run(
             TouchEvent::Motion { id, x, y, time, .. } => {
                 let location: Point<f64, smithay::utils::Logical> =
                     (touch_scale.logical_coord(x as f64), touch_scale.logical_coord(y as f64)).into();
-                let focus = touch_focus_at(data, &activity_id, location);
+                let focus = surface_at(data, &activity_id, location);
                 touch.motion(
                     data,
                     focus,
@@ -464,7 +515,123 @@ pub fn run(
         }
     })?;
 
-    // --- Source 4: Android clipboard channel ---
+    // --- Source 4: Pointer input channel ---
+    // Real mouse input. `CompositorActivity` splits mouse-source
+    // MotionEvents off the touch path, so touchscreen and stylus never
+    // reach here and a click never produces both a wl_touch.down and a
+    // wl_pointer.button. See notes/input.md ("Pointer Input").
+    loop_handle.insert_source(pointer_channel, |event, _, data: &mut TawcState| {
+        let evt = match event {
+            ChannelEvent::Msg(e) => e,
+            ChannelEvent::Closed => return,
+        };
+
+        // No pointer capability means no mouse and no GTK3 workaround; the
+        // events are stale Android input for a seat that can't carry them.
+        let pointer = match data.seat.get_pointer() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let activity_id = match &evt {
+            PointerEvent::Motion { activity_id, .. }
+            | PointerEvent::Button { activity_id, .. }
+            | PointerEvent::Axis { activity_id, .. } => activity_id.clone(),
+        };
+        // Host scoping, like touch: only the visible host drives the pointer.
+        if data.desktop_visible_host_id().as_ref() != Some(&activity_id) {
+            return;
+        }
+
+        let scale = data.output_scale;
+        let serial = SERIAL_COUNTER.next_serial();
+
+        match evt {
+            PointerEvent::Motion { x, y, time, .. } => {
+                let location: Point<f64, Logical> =
+                    (scale.logical_coord(x as f64), scale.logical_coord(y as f64)).into();
+                // Hover is not activation: motion never moves keyboard focus.
+                let focus = surface_at(data, &activity_id, location);
+                data.pointer_location = location;
+                data.pointer_focus = focus.clone();
+                pointer.motion(
+                    data,
+                    focus,
+                    &PointerMotionEvent { location, serial, time },
+                );
+                pointer.frame(data);
+            }
+            PointerEvent::Button { code, pressed, time, .. } => {
+                if pressed {
+                    // A press takes the touch-down path: click outside a menu
+                    // dismisses it, click in a toplevel moves keyboard and
+                    // text-input focus. Smithay's default grab keeps pointer
+                    // focus while the button is held.
+                    let location = data.pointer_location;
+                    let resolution = resolve_touch_down(data, &activity_id, location);
+                    dismiss_host_popups_if_touch_is_outside_popup(
+                        data,
+                        &activity_id,
+                        resolution.popup_focus.as_ref(),
+                        serial,
+                        time,
+                    );
+                    apply_keyboard_focus_action(data, resolution.keyboard_focus);
+                }
+                pointer.button(
+                    data,
+                    &ButtonEvent {
+                        serial,
+                        time,
+                        button: code,
+                        state: if pressed {
+                            ButtonState::Pressed
+                        } else {
+                            ButtonState::Released
+                        },
+                    },
+                );
+                pointer.frame(data);
+            }
+            PointerEvent::Axis { dx, dy, v120_x, v120_y, source, stop, time, .. } => {
+                let mut frame = AxisFrame::new(time).source(match source {
+                    PointerAxisSource::Wheel => AxisSource::Wheel,
+                    PointerAxisSource::Finger => AxisSource::Finger,
+                });
+                if stop {
+                    // Finger scrolling must end explicitly or GTK's kinetic
+                    // scrolling never settles.
+                    frame = frame.stop(Axis::Horizontal).stop(Axis::Vertical);
+                } else {
+                    if dx != 0.0 {
+                        frame = frame.value(Axis::Horizontal, dx);
+                    }
+                    if dy != 0.0 {
+                        frame = frame.value(Axis::Vertical, dy);
+                    }
+                    // Detents only exist on a wheel. Smithay sends
+                    // axis_value120 to v8+ clients and accumulates
+                    // axis_discrete for older ones by itself.
+                    if source == PointerAxisSource::Wheel {
+                        if v120_x != 0 {
+                            frame = frame.v120(Axis::Horizontal, v120_x);
+                        }
+                        if v120_y != 0 {
+                            frame = frame.v120(Axis::Vertical, v120_y);
+                        }
+                    }
+                }
+                pointer.axis(data, frame);
+                pointer.frame(data);
+            }
+        }
+
+        if let Err(e) = data.display_handle.flush_clients() {
+            error!("flush_clients error after pointer: {}", e);
+        }
+    })?;
+
+    // --- Source 5: Android clipboard channel ---
     //
     // Kotlin listens to Android's real ClipboardManager and forwards
     // content-free clip announces here (the content is fetched only when
@@ -568,7 +735,7 @@ pub fn run(
         }
     })?;
 
-    // --- Source 5: Text input channel ---
+    // --- Source 6: Text input channel ---
     // Receives text input events from Android IME via JNI.
     loop_handle.insert_source(text_input_channel, move |event, _, data: &mut TawcState| {
         let evt = match event {
@@ -595,11 +762,14 @@ pub fn run(
         }
     })?;
 
-    // --- Source 5: State query channel ---
+    // --- Source 7: State query channel ---
     // Receives requests for a compositor-thread state snapshot.
     loop_handle.insert_source(state_query_channel, move |event, _, data: &mut TawcState| {
         if let ChannelEvent::Msg(response) = event {
             let clients = data.client_count.load(std::sync::atomic::Ordering::Relaxed);
+            // Report smithay's live pointer, not tawc's tracked copy: a grab
+            // can hold focus somewhere other than the last resolved hit test.
+            let pointer = data.seat.get_pointer();
             let bound_hosts = data
                 .hosts
                 .values()
@@ -618,7 +788,7 @@ pub fn run(
                 .collect::<Vec<_>>()
                 .join(",");
             let payload = format!(
-                "clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} xwayland_running={} xwayland_pids={} x11_surfaces={} x11_surfaces_with_host={} wlegl_create_buffer_total={} wlegl_import_texture_total={} wlegl_buffer_destroy_total={} last_wlegl_width={} last_wlegl_height={} last_wlegl_format={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={}",
+                "clients={} toplevels={} surfaces_wlegl={} surfaces_shm={} frames={} rendered_toplevels={} hosts={} bound_hosts={} xwayland_running={} xwayland_pids={} x11_surfaces={} x11_surfaces_with_host={} wlegl_create_buffer_total={} wlegl_import_texture_total={} wlegl_buffer_destroy_total={} last_wlegl_width={} last_wlegl_height={} last_wlegl_format={} output_scale={:.2} output_physical_w={} output_physical_h={} output_logical_w={} output_logical_h={} pointer_present={} pointer_x={:.2} pointer_y={:.2} pointer_focus={} cursor_shape={}",
                 clients,
                 toplevel_count(data),
                 surfaces_wlegl,
@@ -642,12 +812,21 @@ pub fn run(
                 data.output_physical_size.1,
                 data.output_logical_size.0,
                 data.output_logical_size.1,
+                pointer.is_some(),
+                pointer.as_ref().map(|p| p.current_location().x).unwrap_or(0.0),
+                pointer.as_ref().map(|p| p.current_location().y).unwrap_or(0.0),
+                if pointer.as_ref().is_some_and(|p| p.current_focus().is_some()) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                crate::cursor::debug_shape(data),
             );
             let _ = response.send(payload);
         }
     })?;
 
-    // --- Source 6: Surface lifecycle events from Activities ---
+    // --- Source 8: Surface lifecycle events from Activities ---
     loop_handle.insert_source(surface_event_channel, move |event, _, data: &mut TawcState| {
         let evt = match event {
             ChannelEvent::Msg(e) => e,
@@ -659,7 +838,7 @@ pub fn run(
         }
     })?;
 
-    // --- Source 7: Frame timer (~60 fps) ---
+    // --- Source 9: Frame timer (~60 fps) ---
     // This drives the render loop. Each tick:
     //   1. Update pending XWayland host associations
     //   2. Render one frame for the visible bound host
@@ -934,12 +1113,14 @@ fn handle_surface_event(
             }
         }
         SurfaceEvent::SurfaceDestroyed { activity_id } => {
+            clear_pointer_focus_for_host(data, &activity_id);
             if let Some(host) = data.hosts.get_mut(&activity_id) {
                 host.drop_surface();
                 info!("Host {} surface dropped (record retained)", activity_id);
             }
         }
         SurfaceEvent::ActivityDestroyed { activity_id } => {
+            clear_pointer_focus_for_host(data, &activity_id);
             data.hardware_keys_down
                 .retain(|(host, _)| host != &activity_id);
             // Ask every window assigned to this host to close. Well-behaved
@@ -973,6 +1154,7 @@ fn handle_surface_event(
             } else if data.desktop.foreground_host() == Some(&activity_id) {
                 data.hardware_keys_down
                     .retain(|(host, _)| host != &activity_id);
+                clear_pointer_focus(data);
                 data.desktop.set_foreground_host(None);
                 data.set_input_focus(None);
             }
@@ -986,6 +1168,15 @@ fn handle_surface_event(
         }
         SurfaceEvent::Gtk3BrokenMenusWorkaroundChanged { enabled } => {
             crate::gtk3_menus_workaround::set_enabled(data, enabled);
+        }
+        SurfaceEvent::MouseAttachedChanged { attached } => {
+            if data.mouse_attached != attached {
+                data.mouse_attached = attached;
+                if !attached {
+                    clear_pointer_focus(data);
+                }
+                data.sync_pointer_capability();
+            }
         }
         SurfaceEvent::FullscreenChanged { activity_id, fullscreen } => {
             data.set_host_fullscreen(&activity_id, fullscreen);

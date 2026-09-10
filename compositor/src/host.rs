@@ -182,6 +182,10 @@ pub enum SurfaceEvent {
     XwaylandChanged { enabled: bool },
     /// Runtime toggle for the contained GTK3 broken menubar workaround.
     Gtk3BrokenMenusWorkaroundChanged { enabled: bool },
+    /// Android gained or lost every mouse-class `InputDevice`. One of the
+    /// two reasons the seat advertises `wl_pointer`; ordered with
+    /// `FocusChanged` on purpose, like hardware keys.
+    MouseAttachedChanged { attached: bool },
     /// Android-side fullscreen state changed outside an xdg request.
     FullscreenChanged { activity_id: ActivityId, fullscreen: bool },
     /// Android Back was pressed while this host's Activity was active.

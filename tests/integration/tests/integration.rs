@@ -7,6 +7,7 @@ mod launcher;
 mod libhybris;
 mod libhybris_zink;
 mod linker_config;
+mod pointer_input;
 mod rendering;
 mod settings;
 mod tawcroot;
