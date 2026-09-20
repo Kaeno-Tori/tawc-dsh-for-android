@@ -20,7 +20,7 @@ use std::process::Output;
 use tawc_integration::adb;
 use tawc_integration::exec_broker::{self, Invocation, Request};
 
-const PKG: &str = "me.phie.tawc";
+const PKG: &str = "io.github.kaeno_tori.tawc_dsh";
 const TEST_ID: &str = "wipetest";
 /// Bind source under the sanctioned scratch dir — same `/data`
 /// filesystem as the rootfs, so `-xdev` alone would not stop the
@@ -248,7 +248,7 @@ fn test_wipe_gate_and_su_retry() {
 
     // The uninstall actions above left the op log screen on top of the
     // app's task; test-init closes lingering log screens, dropping back
-    // to the home screen for whatever runs next.
+    // to the main screen for whatever runs next.
     let out = exec_broker::run_capture(Invocation {
         foreground_app: false,
         request: Request::Action { name: "test-init".to_string(), args: vec![] },

@@ -1,8 +1,7 @@
 # In-App Terminal
 
-A per-distro terminal (home-screen "Terminal" button under "Manage")
-giving an interactive shell into an installed rootfs without the
-compositor/graphics stack.
+A per-distro terminal (the dock's "terminal" entry) giving an interactive
+shell into an installed rootfs.
 
 ## Termux terminal modules
 
@@ -73,13 +72,12 @@ rootfs (`chsh` to a since-uninstalled shell). `-l` is accepted by
 bash, zsh, fish, dash and ksh alike. There is deliberately no app-side
 shell setting: `chsh` already expresses it.
 
-Only interactive tabs switch shells. Every command spawn — command
-sessions below, launcher Exec lines, install steps, `RunCommandOp`,
+Only interactive tabs switch shells. Every command spawn — install
+steps, `RunCommandOp`,
 the exec broker, `rootfs-run.sh` — stays on `/bin/bash -lc`, because
-Exec lines, the hold-open trailer and the install scripts all assume
+the install scripts all assume
 POSIX-or-better syntax that fish doesn't speak. `SHELL` in the
-`RootfsEnv` map *is* the resolved shell on every tawcroot spawn, so
-scripts and GUI terminals launched from the desktop open the same one.
+`RootfsEnv` map *is* the resolved shell on every tawcroot spawn.
 
 `ShellDefaults`' prompt and cwd tab title are bash-only (they live in
 `/root/.bashrc` + `/usr/lib/tawc/bashrc`), so a zsh/fish tab gets that
@@ -95,34 +93,14 @@ tawcroot-only: chroot spawns via `su` (no pty fd to hand over) and
 proot is dev-only, so the button is gated on
 `Installation.method == tawcroot` + state READY.
 
-## Command sessions (launcher `Terminal=true` entries)
-
-`EntryLauncher` routes `Terminal=true` launcher entries on tawcroot
-installs here: `EXTRA_COMMAND` (the entry's Exec line) + `EXTRA_LABEL`
-(the entry name) on the same per-distro document URI.
-`ptyShellExec(command=…)` swaps `-l` for `-lc <command>` — still a
-login shell so profile env fires, matching `startInside`. The command
-gets a hold-open trailer (`; __c=$?; printf '\n[exited %d — press any
-key]\n' "$__c"; read -rsn1`) so a short script's output doesn't vanish
-with the tab: the session is still alive during `read`, so a keypress
-ends the shell and the normal tab-removal flow runs — no
-session-lifecycle changes. `onCreate` consumes the extras
-(`removeExtra`) so recreation doesn't respawn the command; a repeat
-launch while the task is alive lands in `onNewIntent`
-(`intoExisting`) and opens a new tab running the command. The tab is
-labelled with the entry name via `TerminalSession.mSessionName` until
-an OSC title arrives. proot/chroot entries keep the headless launch
-plus a logcat warn (debug-only methods). Verified on-device
-2026-07-04.
-
 ## Session model
 
 `TerminalSessions` is a process-wide registry of installation id → an
 ordered list of `TerminalSession`s plus the selected index: multiple
 shells per distro shown as tabs, reattached (sessions, labels, and
-selection) on reopen/rotation (`TerminalActivity` uses the
-CompositorActivity document trick — `documentLaunchMode="intoExisting"`
-+ `tawc://terminal/<id>` URI — for one activity/recents card per
+selection) on reopen/rotation (`TerminalActivity` uses
+`documentLaunchMode="intoExisting"` + `taskAffinity=""` + a unique
+`tawc://terminal/<id>` data URI — one activity/recents card per
 distro). The registry is dumb bookkeeping (`@Synchronized` order +
 selection, JVM-unit-tested); tab policy lives in the activity. One
 `TerminalView` shows the selected session via `attachSession()`
@@ -160,9 +138,8 @@ Verified on-device 2026-06-10. The compact
 surface) replaced the scaffold toolbar; system back still just
 backgrounds the task.
 
-The compositor is *not* started or waited for. The Wayland/X11 env
-vars are still set, so GUI apps launched from the terminal connect
-only if a compositor session is already up; CLI work needs nothing.
+There is no display stack to wait for: a tab is usable as soon as the
+pty is up.
 
 ## Running Android commands
 

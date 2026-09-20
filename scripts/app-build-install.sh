@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build, install, and optionally launch the debug APK.
 #
-# Usage: scripts/app-build-install.sh [--no-build] [--no-launch] [--force-install] [--graphics=list|--no-gfxstream|--no-mesa] [--xwayland|--no-xwayland]
+# Usage: scripts/app-build-install.sh [--no-build] [--no-launch] [--force-install] [--graphics=list|--no-mesa]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +19,7 @@ for arg in "$@"; do
         --no-build)  DO_BUILD=0 ;;
         --no-launch) DO_LAUNCH=0 ;;
         --force-install) FORCE_INSTALL=1 ;;
-        --graphics=*|--no-gfxstream|--no-mesa|--xwayland|--no-xwayland) BUILD_ARGS+=("$arg") ;;
+        --graphics=*|--no-mesa) BUILD_ARGS+=("$arg") ;;
         -h|--help)
             sed -n '2,/^set -/p' "$0" | sed 's/^# \?//;$d'
             exit 0
@@ -44,7 +44,7 @@ apk_sha() {
 
 installed_apk_sha() {
     local path
-    path=$(adb shell pm path me.phie.tawc 2>/dev/null \
+    path=$(adb shell pm path io.github.kaeno_tori.tawc_dsh 2>/dev/null \
         | tr -d '\r' \
         | sed -n 's/^package://p' \
         | head -n1)
@@ -65,6 +65,8 @@ fi
 
 if [ "$DO_LAUNCH" -eq 1 ]; then
     echo "=== Launching MainActivity ==="
-    adb shell am force-stop me.phie.tawc
-    adb shell am start -n me.phie.tawc/.MainActivity >/dev/null
+    adb shell am force-stop io.github.kaeno_tori.tawc_dsh
+    # Fully qualified: the shorthand expands against the applicationId,
+    # but this app's namespace (me.phie.tawc) is deliberately different.
+    adb shell am start -n io.github.kaeno_tori.tawc_dsh/me.phie.tawc.MainActivity >/dev/null
 fi

@@ -1,22 +1,22 @@
-# Pinned Rust toolchain for the whole repo (compositor, integration tests,
-# and the cargo builds inside deps/). rustup reads this from any cwd under
-# the repo root and installs the toolchain + targets on demand.
+# Pinned Rust toolchain for the whole repo (the andobridge JNI library and
+# the integration tests). rustup reads this from any cwd under the repo
+# root and installs the toolchain + targets on demand.
 #
-# Pinned so reproducible/offline builders (notably the F-Droid buildserver
-# recipe) get the same compiler we test with, rather than whatever `stable`
-# happens to be on the day of the build. Bump deliberately: change the
-# version here, then run scripts/build-app.sh to confirm it still builds.
+# Pinned so reproducible/offline builders get the same compiler we test with,
+# rather than whatever `stable` happens to be on the day of the build. Bump
+# deliberately: change the version here, then run scripts/build-app.sh to
+# confirm it still builds.
 #
 # cargo-ndk is a cargo subcommand, not a rustup component, so it can't be
 # pinned here — see notes/building.md for the known-good version.
 [toolchain]
 channel = "1.93.0"
-# Android targets: the compositor. glibc targets: Mesa's gfxstream-vk Rust
-# pieces, cross-built by scripts/build-mesa-gfxstream.sh. Listing all four
-# means a fresh clone needs no `rustup target add` — see notes/building.md.
+# The Android targets are the ones `cargo ndk` cross-builds the andobridge
+# JNI library for (Gradle's per-ABI tasks). Listing them means a fresh
+# clone needs no `rustup target add` — see notes/building.md. The host
+# tools (`tawc-exec`, the integration tests) build for the default host
+# target, which rustup installs with the toolchain anyway.
 targets = [
     "aarch64-linux-android",
     "x86_64-linux-android",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-gnu",
 ]

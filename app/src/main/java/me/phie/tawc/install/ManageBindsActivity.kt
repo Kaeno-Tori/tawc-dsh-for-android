@@ -20,13 +20,15 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import me.phie.tawc.R
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
 import me.phie.tawc.ui.tawcButtonSizePx
-import me.phie.tawc.ui.tawcCard
+import me.phie.tawc.ui.tawcDivider
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcInput
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.tonalIconButton
 import me.phie.tawc.ui.verticalLp
@@ -82,12 +84,12 @@ class ManageBindsActivity : AppCompatActivity() {
         if (installId == null) publishResult()
 
         scaffold = buildChildScreen(getString(R.string.title_manage_binds))
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_card_padding)
 
         scaffold.content.addView(
             TextView(this).apply {
                 text = getString(R.string.manage_binds_intro)
-                textSize = 14f
+                tawcText(R.style.TextAppearance_Tawc_Body)
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
         )
@@ -103,7 +105,7 @@ class ManageBindsActivity : AppCompatActivity() {
             // as hidden *behind* the button rather than scrolled off.
             // Fade the clipped edge instead.
             isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength((24 * resources.displayMetrics.density).toInt())
+            setFadingEdgeLength(resources.getDimensionPixelSize(R.dimen.tawc_space_xl))
             addView(listColumn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
         scaffold.content.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -188,7 +190,7 @@ class ManageBindsActivity : AppCompatActivity() {
         row.addView(
             TextView(this).apply {
                 text = getString(R.string.manage_binds_grant_banner)
-                textSize = 14f
+                tawcText(R.style.TextAppearance_Tawc_Body)
                 setTextColor(getColor(R.color.tawc_danger))
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
@@ -208,40 +210,54 @@ class ManageBindsActivity : AppCompatActivity() {
     }
 
     private fun renderList() {
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_card_padding)
         listColumn.removeAllViews()
         if (binds.isEmpty()) {
             listColumn.addView(
                 TextView(this).apply {
                     text = getString(R.string.manage_binds_empty)
-                    textSize = 14f
+                    tawcText(R.style.TextAppearance_Tawc_Body)
+                    setTextColor(tawcSecondaryColor())
                 },
-                verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2),
+                verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad),
             )
         }
         for ((index, bind) in binds.withIndex()) {
-            listColumn.addView(bindCard(bind, index, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+            listColumn.addView(bindCard(bind, index, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT))
         }
-        // Unbound common dirs (matched by guest path) trail the active
-        // list under a "Suggested binds" header as one-tap suggestions.
-        // Host dirs that verifiably don't exist are left out; without
-        // the grant they can't be stat'd, so all suggestions show.
+        // Unbound common dirs trail the active list under a "Suggested
+        // binds" header as one-tap suggestions. Host dirs that verifiably
+        // don't exist are left out; without the grant they can't be
+        // stat'd, so all suggestions show.
+        //
+        // Suppressed by host path *or* guest path, and both halves earn
+        // their place. Host: a suggestion's whole content is "expose this
+        // Android directory", so one that is already exposed somewhere
+        // else is not a suggestion — it is the same grant twice, and the
+        // guest path is the only thing that would differ. That case is
+        // real as soon as a default changes (metadata holds the guest
+        // path, so an install bound at the old default keeps it and would
+        // otherwise be offered the new default alongside). Guest: a
+        // suggestion whose guest path is taken by a *different* host
+        // would render an Add that validate rejects on tap.
         val suggestions = AllFilesAccess.commonDirBinds().filter { common ->
-            binds.none { it.guestPath == common.guestPath } &&
+            binds.none { it.guestPath == common.guestPath || it.hostPath == common.hostPath } &&
                 !AllFilesAccess.hostDirVerifiablyMissing(common.hostPath)
         }
         if (suggestions.isNotEmpty()) {
             listColumn.addView(
                 TextView(this).apply {
                     text = getString(R.string.manage_binds_suggested)
-                    textSize = 14f
-                    setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+                    tawcText(R.style.TextAppearance_Tawc_BodyStrong)
+                    setTextColor(getColor(R.color.tawc_label_primary))
+                    setPadding(0, pad, 0, resources.getDimensionPixelSize(R.dimen.tawc_space_s))
                 },
-                verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2).also { it.topMargin = pad / 2 },
+                verticalLp(MATCH_PARENT, WRAP_CONTENT),
             )
+            listColumn.addView(tawcDivider())
         }
         for (common in suggestions) {
-            listColumn.addView(suggestionCard(common, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
+            listColumn.addView(suggestionCard(common, pad), verticalLp(MATCH_PARENT, WRAP_CONTENT))
         }
     }
 
@@ -254,7 +270,6 @@ class ManageBindsActivity : AppCompatActivity() {
         dim: Boolean,
         selectable: Boolean,
     ): LinearLayout {
-        val density = resources.displayMetrics.density
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -262,12 +277,13 @@ class ManageBindsActivity : AppCompatActivity() {
         row.addView(
             ImageView(this).apply {
                 setImageResource(iconRes)
-                imageTintList = ColorStateList.valueOf(
-                    MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
-                )
+                imageTintList = ColorStateList.valueOf(tawcSecondaryColor())
             },
-            LinearLayout.LayoutParams((16 * density).toInt(), (16 * density).toInt()).apply {
-                marginEnd = (8 * density).toInt()
+            LinearLayout.LayoutParams(
+                resources.getDimensionPixelSize(R.dimen.tawc_icon_inline),
+                resources.getDimensionPixelSize(R.dimen.tawc_icon_inline),
+            ).apply {
+                marginEnd = resources.getDimensionPixelSize(R.dimen.tawc_space_s)
             },
         )
         row.addView(
@@ -276,7 +292,7 @@ class ManageBindsActivity : AppCompatActivity() {
                 textSize = sizeSp
                 typeface = Typeface.MONOSPACE
                 if (dim) {
-                    setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+                    setTextColor(tawcSecondaryColor())
                 }
                 setTextIsSelectable(selectable)
             },
@@ -287,20 +303,19 @@ class ManageBindsActivity : AppCompatActivity() {
 
     private fun readOnlyLabel(): TextView = TextView(this).apply {
         text = getString(R.string.manage_binds_read_only)
-        textSize = 12f
-        val color = MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        tawcText(R.style.TextAppearance_Tawc_Caption)
+        val color = tawcSecondaryColor()
         setTextColor(color)
         // Lock occupies the same 16dp icon slot as the pathRow logos so
         // the icon column and text column both line up.
-        val density = resources.displayMetrics.density
         val lock = androidx.appcompat.content.res.AppCompatResources
             .getDrawable(context, R.drawable.ic_lock)?.mutate()?.apply {
-                val size = (16 * density).toInt()
+                val size = resources.getDimensionPixelSize(R.dimen.tawc_icon_inline)
                 setBounds(0, 0, size, size)
                 setTint(color)
             }
         setCompoundDrawablesRelative(lock, null, null, null)
-        compoundDrawablePadding = (8 * density).toInt()
+        compoundDrawablePadding = resources.getDimensionPixelSize(R.dimen.tawc_space_s)
         gravity = Gravity.CENTER_VERTICAL
     }
 
@@ -308,7 +323,7 @@ class ManageBindsActivity : AppCompatActivity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(pad, pad / 2, pad, pad / 2)
+            setPadding(0, pad, 0, pad)
         }
         // Guest (Linux) path over the Android path it's linked to,
         // each tagged with its OS logo.
@@ -343,7 +358,18 @@ class ManageBindsActivity : AppCompatActivity() {
             buttons,
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = pad / 2 },
         )
-        return tawcCard().apply { addView(row) }
+        return listItem(row)
+    }
+
+    /**
+     * DSH's list shape: the row, then the hairline that closes it. No card —
+     * the separators are what group the list.
+     */
+    private fun listItem(row: View): LinearLayout {
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(row, verticalLp(MATCH_PARENT, WRAP_CONTENT))
+        column.addView(tawcDivider())
+        return column
     }
 
     /** One-tap suggestion for an unbound common dir: guest path plus
@@ -353,17 +379,25 @@ class ManageBindsActivity : AppCompatActivity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(pad, pad / 2, pad, pad / 2)
+            setPadding(0, pad, 0, pad)
         }
-        // No OS logo here: suggestions show only the guest path, and the
-        // bare text keeps them visually distinct from active binds.
+        // Both ends of the pair, exactly as an active bind's card shows
+        // them. A suggestion is a promise to expose an Android directory,
+        // so *which* directory is the half worth reading before tapping
+        // Add — `/android ⇐ /` hands over the whole Android root, and the
+        // suggestions whose guest name doesn't name their source (DCIM,
+        // Movies) are precisely where the old guest-path-only form read as
+        // if the bind were already made. Suggestions stay distinct from
+        // active binds by their section header and accent Add button, not
+        // by hiding half the pair.
         val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        labels.addView(TextView(this).apply {
-            text = bind.guestPath
-            textSize = 16f
-            typeface = Typeface.MONOSPACE
-            setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
-        })
+        labels.addView(
+            pathRow(R.drawable.ic_linux_logo, bind.guestPath, 16f, dim = false, selectable = true),
+            verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 4),
+        )
+        labels.addView(
+            pathRow(R.drawable.ic_android_logo, bind.hostPath, 14f, dim = true, selectable = true),
+        )
         if (bind.readOnly) {
             labels.addView(readOnlyLabel())
         }
@@ -374,6 +408,11 @@ class ManageBindsActivity : AppCompatActivity() {
                 R.drawable.ic_add,
                 getString(R.string.action_add),
                 backgroundColor = R.color.tawc_accent,
+                // Pair the fill with its own foreground: the default is the
+                // *ghost* pairing (label-primary icon), which on a
+                // label-primary fill draws a near-black plus on a near-black
+                // disc — i.e. a solid dot.
+                foregroundColor = R.color.tawc_on_accent,
             ) {
                 val problem = validate(bind, null)
                 if (problem != null) {
@@ -385,19 +424,19 @@ class ManageBindsActivity : AppCompatActivity() {
             },
             LinearLayout.LayoutParams(btnSize, btnSize).apply { marginStart = pad / 2 },
         )
-        return tawcCard().apply { addView(row) }
+        return listItem(row)
     }
 
     /** Add (`editIndex == null`) or edit (`editIndex` set) one bind. */
     private fun showEditDialog(editIndex: Int?) {
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_card_padding)
         val existing = editIndex?.let { binds[it] }
 
-        fun pathField(initial: String?): EditText = EditText(this).apply {
+        fun pathField(initial: String?): EditText = tawcInput().apply {
             setText(initial ?: "")
             isSingleLine = true
             typeface = Typeface.MONOSPACE
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
             // URI variation kills Gboard autocorrect (which ignores
             // TYPE_TEXT_FLAG_NO_SUGGESTIONS) without the password
             // semantics that made autofill services throw unlock
@@ -416,12 +455,12 @@ class ManageBindsActivity : AppCompatActivity() {
         }
         column.addView(TextView(this).apply {
             text = getString(R.string.manage_binds_guest_label)
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
         })
         column.addView(guestField, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
         column.addView(TextView(this).apply {
             text = getString(R.string.manage_binds_host_label)
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
         })
         column.addView(hostField, verticalLp(MATCH_PARENT, WRAP_CONTENT))
         column.addView(

@@ -542,13 +542,14 @@
    With those two fixes, the then-named `test_input_dispatch` suite
    against `--es method tawcroot` passed all 13 input-dispatch
    scenarios on the OnePlus 9 in ~22 s.
-   This is the first integration-test suite running entirely under
+   This was the first integration-test suite to run entirely under
    tawcroot on the device — the then-current debug app built in the
    chroot install (gcc-on-tawcroot is fine post-faccessat fix; the
    harness supported `TAWC_BUILD_INSTALL_ID` to build in a sibling
-   install if desired) and ran from the tawcroot rootfs against the in-app
-   compositor over the shared `/data/data/me.phie.tawc/wayland-0`
-   socket.
+   install if desired) and ran from the tawcroot rootfs against the
+   then-in-app compositor over its shared
+   `/data/data/me.phie.tawc/wayland-0`
+   socket (compositor, Wayland and that socket are all gone now).
 
 - **Fixed: GNU `wc` 9.11 segfault.** A core dump (with `ulimit -c
   unlimited` under root) showed `si_code=SEGV_MAPERR`, fault address
@@ -631,12 +632,13 @@
    `faccessat` NR 269); see "Bugs found while bringing up the gtk4
    input integration tests" above. With those fixed, the
    then-named `test_input_dispatch` integration suite (13 input-dispatch
-   scenarios driving gtk4 through the compositor over Wayland) runs
-   entirely under tawcroot on the OnePlus 9.
+   scenarios driving gtk4 through the compositor over Wayland) ran
+   entirely under tawcroot on the OnePlus 9; both the suite and the
+   compositor it drove went with the display stack.
 
 - **Phase 5c — full integration suite, OnePlus 9** (2026-05-02):
-   pacman package install and the wider chroot-test surface come
-   online. **12 of 12 integration tests pass** through tawcroot
+   pacman package install and the wider chroot-test surface came
+   online. **12 of 12 integration tests passed** through tawcroot
    on the OnePlus 9 with no `MOZ_DISABLE_*_SANDBOX` workaround env
    vars. Firefox-side fixes landed: in-handler `/dev/shm` memfd
    emulation (`tawcroot/src/shm.c`) so Mozilla's `shm_open(3)`
@@ -652,7 +654,7 @@
    `wlegl: imported` log-grep (only true while the WebRender
    buffer ring is still growing) to a compositor-state check
    (`surfaces_wlegl >= 1 && surfaces_shm == 0 && frames > before`)
-   which catches the same regressions without false-failing on
+   which caught the same regressions without false-failing on
    settled rings. Three aarch64-relevant
    bugs found and fixed:
      1. **close-loop death-spiral via gpgme.** glibc's
@@ -732,7 +734,8 @@
    With those fixes pacman installs packages cleanly (`pacman -S`
    completed pkgconf in 1.5s, the full test-deps set in ~5 minutes),
    gtk3/gtk4 demos, weston, Vulkan clients, supertuxkart, and the
-   then-named `test_input_dispatch` flow all pass on the OnePlus 9.
+   then-named `test_input_dispatch` flow all passed on the OnePlus 9
+   at the time (none of those graphical programs run here any more).
    Keyring init (`pacman-key --init && --populate archlinux`) also
    completes end-to-end after the wc-segfault loader-stack fix.
 

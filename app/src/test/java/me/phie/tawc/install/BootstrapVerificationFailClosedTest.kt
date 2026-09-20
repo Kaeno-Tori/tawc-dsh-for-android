@@ -4,11 +4,13 @@ import android.content.Context
 import android.content.ContextWrapper
 import me.phie.tawc.install.distro.BootstrapFlavor
 import me.phie.tawc.install.distro.DistroRegistry
+import me.phie.tawc.install.distro.ImportedPack
 import me.phie.tawc.install.distro.PackageBootstrap
 import me.phie.tawc.install.distro.TarballBootstrap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.File
 import java.io.IOException
@@ -129,6 +131,17 @@ class BootstrapVerificationFailClosedTest {
                             File(rawDir, "${b.keyResource}.asc").isFile,
                         )
                     }
+                    // Imported packs are the one bootstrap with no
+                    // verification policy, because there is no upstream
+                    // to check them against — the user is the authority.
+                    // That is only sound while they can't be *declared*:
+                    // a distro shipping one would be a distro shipping
+                    // an unverifiable default, which is the thing this
+                    // whole test exists to prevent.
+                    is ImportedPack -> fail(
+                        "${distro.displayName} $flavor: a distro must not declare an " +
+                            "imported pack as a bootstrap flavor",
+                    )
                 }
             }
         }

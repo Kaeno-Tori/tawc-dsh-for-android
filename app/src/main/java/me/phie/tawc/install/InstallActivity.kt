@@ -21,18 +21,21 @@ import com.google.android.material.color.MaterialColors
 import me.phie.tawc.R
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
-import me.phie.tawc.ops.LogScreenActivity
+import me.phie.tawc.install.distro.origin
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcInput
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
 /**
- * "Install new distro" screen. Form-only: distro / label / method /
- * cache-proxy controls plus an Install button. Tapping Install kicks
- * off [InstallationService] and hands the user off to
- * [LogScreenActivity] for the live progress view, then finishes itself
- * — so the back stack is `home → log`, not `home → form → log`.
+ * "Install new distro" screen — the setup flow's "customize" path.
+ * Form-only: distro / label / method / cache-proxy controls plus an
+ * Install button. Tapping Install kicks off [InstallationService] and
+ * finishes, so the screen behind it (the setup screen, which renders the
+ * install inline) picks the progress up.
  *
  * Mutating an installation never happens as a side-effect of opening
  * this screen. The button press is the only trigger; CLI install /
@@ -47,12 +50,8 @@ class InstallActivity : AppCompatActivity() {
     private var selectedDistro: String? = null
 
     /** (distro key, radio) for every rendered distro option; the
-     *  picker manages exclusivity across the supported/other split
-     *  itself. See [buildDistroPicker]. */
+     *  picker manages exclusivity itself. See [buildDistroPicker]. */
     private val distroRadios = mutableListOf<Pair<String, RadioButton>>()
-    private var otherDistrosExpanded = false
-    private var otherDistroList: LinearLayout? = null
-    private var otherDistroToggle: MaterialButton? = null
     private var labelEdited: Boolean = false
 
     /**
@@ -66,6 +65,27 @@ class InstallActivity : AppCompatActivity() {
     private var bootstrapRow: LinearLayout? = null
 
     /**
+     * Download-mirror input and its preview line. [savedMirrorText] is
+     * the field's text as restored from instance state (or the persisted
+     * [me.phie.tawc.Settings.bootstrapMirror] on a cold start); it is
+     * written back to Settings in [beginInstall] rather than on every
+     * keystroke, so a half-typed URL can't outlive the form.
+     *
+     * The spinner above the field is a shortcut, not a second source of
+     * truth: it writes the base URL into the field and otherwise only
+     * *reflects* it ([syncMirrorSpinner]). That keeps the two from
+     * disagreeing — and makes "the text matches no preset" the same
+     * state as "Custom…" instead of a snap-back fight.
+     */
+    private lateinit var mirrorField: EditText
+    private lateinit var mirrorHint: TextView
+    private lateinit var mirrorPresetRow: LinearLayout
+    private var mirrorSpinner: android.widget.Spinner? = null
+    private var mirrorPresets: List<String> = emptyList()
+    private var mirrorSync = false
+    private var savedMirrorText: String = ""
+
+    /**
      * External-storage binds the install starts with (see
      * notes/external-binds.md). Starts empty, edited via
      * [ManageBindsActivity], passed to the service as JSON. Only
@@ -75,6 +95,15 @@ class InstallActivity : AppCompatActivity() {
     private val pendingBinds = mutableListOf<ExternalBind>()
     private var bindsRow: LinearLayout? = null
     private var bindsCountLabel: TextView? = null
+
+    /**
+     * Whether [pendingBinds] still holds the set the form was *seeded*
+     * with rather than one the user assembled. Only affects the row's
+     * wording (see [updateBindsRow]); cleared the moment the manage
+     * screen comes back with a list, so the label can't outlive the
+     * provenance it describes.
+     */
+    private var bindsSeededFromHome = false
     private val manageBinds = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -85,6 +114,7 @@ class InstallActivity : AppCompatActivity() {
                 runCatching { ExternalBind.fromJsonArray(org.json.JSONArray(json)) }
                     .getOrDefault(emptyList())
             )
+            bindsSeededFromHome = false
             updateBindsRow()
         }
     }
@@ -122,7 +152,6 @@ class InstallActivity : AppCompatActivity() {
         selectedMethod = savedInstanceState?.getString(KEY_METHOD)
         selectedDistro = savedInstanceState?.getString(KEY_DISTRO)
         selectedBootstrap = savedInstanceState?.getString(KEY_BOOTSTRAP)
-        otherDistrosExpanded = savedInstanceState?.getBoolean(KEY_OTHER_DISTROS) == true
         labelEdited = savedInstanceState?.getBoolean(KEY_LABEL_EDITED) == true
         useCacheProxy = when {
             savedInstanceState?.containsKey(KEY_USE_PROXY) == true ->
@@ -133,6 +162,11 @@ class InstallActivity : AppCompatActivity() {
             else -> false
         }
         andoEnabled = savedInstanceState?.getBoolean(KEY_ANDO) == true
+        // Seed from the saved setting so a mirror survives an app
+        // restart — it is a persisted preference, not a per-install
+        // choice, and re-typing it on every install would be hostile.
+        savedMirrorText = savedInstanceState?.getString(KEY_MIRROR)
+            ?: me.phie.tawc.Settings.bootstrapMirror
         pendingBinds.clear()
         savedInstanceState?.getString(KEY_BINDS)?.let { savedBinds ->
             pendingBinds.addAll(
@@ -140,10 +174,27 @@ class InstallActivity : AppCompatActivity() {
                     .getOrDefault(emptyList())
             )
         }
+        // A form opened fresh — not restored — starts from the main
+        // screen's "bind shared storage automatically" choice, so the two
+        // ways into an install agree about the default instead of
+        // MainActivity mapping storage and this one silently mapping
+        // nothing.
+        // Seeded once and only when the list is empty: once it is on
+        // screen the list is the user's, and clearing it in the manage
+        // screen must not be undone by a later re-seed. Rotation takes
+        // the [KEY_BINDS] path above instead, which is what keeps an
+        // emptied list empty.
+        bindsSeededFromHome = savedInstanceState == null &&
+            pendingBinds.isEmpty() &&
+            AllFilesAccess.declared(this) &&
+            (me.phie.tawc.Settings.autoBindSharedStorage ?: AllFilesAccess.granted())
+        if (bindsSeededFromHome) {
+            pendingBinds.addAll(AllFilesAccess.sharedStorageBinds())
+        }
 
         scaffold = buildChildScreen(getString(R.string.title_install))
 
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
         formSection = buildFormSection(pad, savedInstanceState?.getString(KEY_LABEL_TEXT))
         // Wrap the form in a ScrollView so the soft keyboard can lift
         // the EditText into view without ever covering the Install
@@ -171,9 +222,11 @@ class InstallActivity : AppCompatActivity() {
         selectedMethod?.let { outState.putString(KEY_METHOD, it) }
         selectedDistro?.let { outState.putString(KEY_DISTRO, it) }
         selectedBootstrap?.let { outState.putString(KEY_BOOTSTRAP, it) }
-        outState.putBoolean(KEY_OTHER_DISTROS, otherDistrosExpanded)
         useCacheProxy?.let { outState.putBoolean(KEY_USE_PROXY, it) }
         outState.putBoolean(KEY_ANDO, andoEnabled)
+        if (::mirrorField.isInitialized) {
+            outState.putString(KEY_MIRROR, mirrorField.text.toString())
+        }
         outState.putString(KEY_BINDS, ExternalBind.toJsonArray(pendingBinds).toString())
     }
 
@@ -188,6 +241,8 @@ class InstallActivity : AppCompatActivity() {
         val available = DistroRegistry.availableForHost()
 
         s.addView(buildDistroPicker(available), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
+        s.addView(buildMirrorField(), verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
         // Dev-only bootstrap-flavor radio row, between the distro
         // picker and the label field. Rendered only when the selected
@@ -225,7 +280,7 @@ class InstallActivity : AppCompatActivity() {
             s.addView(
                 MaterialButton(this, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
                     text = getString(R.string.install_help_methods)
-                    setTextColor(getColor(R.color.tawc_accent))
+                    setTextColor(getColor(R.color.tawc_info))
                     setOnClickListener {
                         startActivity(Intent(this@InstallActivity, InstallMethodInfoActivity::class.java))
                     }
@@ -240,8 +295,8 @@ class InstallActivity : AppCompatActivity() {
         s.addView(
             TextView(this).apply {
                 text = getString(R.string.install_changeable_later)
-                textSize = 13f
-                alpha = 0.7f
+                tawcText(R.style.TextAppearance_Tawc_BodySmall)
+                setTextColor(tawcSecondaryColor())
             },
             verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 4),
         )
@@ -292,13 +347,13 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildDistroPicker(available: List<Distro>): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = getString(R.string.install_distro_label); textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_distro_label); tawcText(R.style.TextAppearance_Tawc_Body) }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         if (available.isEmpty()) {
             val msg = TextView(this).apply {
                 text = getString(R.string.install_no_supported_distro)
-                textSize = 14f
+                tawcText(R.style.TextAppearance_Tawc_Body)
                 typeface = Typeface.MONOSPACE
             }
             container.addView(msg, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -306,49 +361,16 @@ class InstallActivity : AppCompatActivity() {
         }
 
         distroRadios.clear()
-        val supported = available.filter { it.supported }
-        val other = available.filterNot { it.supported }
 
-        // available is supported-first, so the fallback pick is a
-        // supported distro whenever there is one.
         val initialKey = selectedDistro?.takeIf { k -> available.any { it.key == k } }
             ?: available.first().key
 
-        for (d in supported) {
+        for (d in available) {
             container.addView(distroRadio(d), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        }
-
-        if (other.isNotEmpty()) {
-            val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            list.addView(captionView(getString(R.string.install_distro_other_note)))
-            for (d in other) {
-                list.addView(distroRadio(d), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            }
-            otherDistroList = list
-            val toggle = MaterialButton(
-                this, null, com.google.android.material.R.attr.borderlessButtonStyle,
-            ).apply {
-                setTextColor(getColor(R.color.tawc_accent))
-                setOnClickListener { setOtherDistrosExpanded(!otherDistrosExpanded) }
-            }
-            otherDistroToggle = toggle
-            container.addView(toggle, verticalLp(WRAP_CONTENT, WRAP_CONTENT))
-            container.addView(list, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            // Never hide the current pick behind a collapsed expander.
-            setOtherDistrosExpanded(
-                otherDistrosExpanded || other.any { it.key == initialKey },
-            )
         }
 
         selectDistro(initialKey, updateLabel = false)
         return container
-    }
-
-    /** Quiet caption line under the "Other distros" expander. */
-    private fun captionView(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 12f
-        setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
     }
 
     /** One distro radio, registered in [distroRadios] for exclusivity. */
@@ -384,15 +406,8 @@ class InstallActivity : AppCompatActivity() {
             DistroRegistry.availableForHost().firstOrNull { it.key == key }
                 ?.let { setLabelTextSilently(it.defaultLabel) }
         }
+        updateMirrorRow()
         revalidate()
-    }
-
-    private fun setOtherDistrosExpanded(expanded: Boolean) {
-        otherDistrosExpanded = expanded
-        otherDistroList?.visibility = if (expanded) View.VISIBLE else View.GONE
-        otherDistroToggle?.text = getString(
-            if (expanded) R.string.install_distro_other_hide else R.string.install_distro_other_show,
-        )
     }
 
     /**
@@ -412,7 +427,7 @@ class InstallActivity : AppCompatActivity() {
         }
         row.visibility = View.VISIBLE
         row.addView(
-            TextView(this).apply { text = getString(R.string.install_bootstrap_label); textSize = 14f },
+            TextView(this).apply { text = getString(R.string.install_bootstrap_label); tawcText(R.style.TextAppearance_Tawc_Body) },
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
         )
         val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
@@ -433,7 +448,195 @@ class InstallActivity : AppCompatActivity() {
         idsByFlavor.entries.firstOrNull { it.value == initial }?.let { group.check(it.key) }
         group.setOnCheckedChangeListener { _, checkedId ->
             idsByFlavor[checkedId]?.let { selectedBootstrap = it }
+            updateMirrorHint()
         }
+    }
+
+    /**
+     * Build the optional download-mirror block: a mirror picker, a
+     * free-text base URL, and a preview of the URL that will actually be
+     * downloaded.
+     *
+     * The distro's bootstrap URL is a compile-time constant pointing at
+     * one upstream origin, which is the wrong origin for most of the
+     * world — this lets the user re-root that download onto a mirror
+     * their network can reach. See
+     * [me.phie.tawc.install.BootstrapMirror] for what "re-root" means
+     * (a prefix swap, not an origin swap) and why the substitution can't
+     * be done any earlier.
+     *
+     * The preview line is the only honest way to show this setting: the
+     * user names a mirror, and the app decides where the distro's own
+     * path slots in underneath it.
+     */
+    private fun buildMirrorField(): LinearLayout {
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(
+            TextView(this).apply { text = getString(R.string.install_mirror_label); tawcText(R.style.TextAppearance_Tawc_Body) },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+        )
+
+        mirrorPresetRow = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(mirrorPresetRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        mirrorField = tawcInput().apply {
+            setText(savedMirrorText)
+            hint = getString(R.string.install_mirror_hint)
+            isSingleLine = true
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_URI
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: Editable?) = updateMirrorHint()
+            })
+        }
+        container.addView(mirrorField, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        mirrorHint = TextView(this).apply {
+            tawcText(R.style.TextAppearance_Tawc_Caption)
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        container.addView(mirrorHint, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        updateMirrorRow()
+        return container
+    }
+
+    /**
+     * (Re)build the preset spinner for the currently selected distro.
+     * Called on distro and flavor changes, not on keystrokes — the list
+     * of presets only depends on which distro is picked, because each
+     * one keeps its bootstrap under a different directory on the same
+     * mirrors.
+     */
+    private fun updateMirrorRow() {
+        if (!::mirrorPresetRow.isInitialized) return
+        mirrorPresetRow.removeAllViews()
+
+        val path = currentMirrorPath()
+        // The same composition the probe uses as its candidate pool, so
+        // every mirror offered here is one the install will measure.
+        mirrorPresets = path?.let { me.phie.tawc.install.distro.MirrorPresets.basesFor(it) }
+            ?: emptyList()
+
+        val labels = buildList {
+            add(getString(R.string.install_mirror_preset_upstream))
+            me.phie.tawc.install.distro.MirrorPresets.ALL.forEach { add(getString(it.nameRes)) }
+            add(getString(R.string.install_mirror_preset_custom))
+        }
+        val spinner = android.widget.Spinner(this).apply {
+            isEnabled = mirrorPresets.isNotEmpty()
+            adapter = android.widget.ArrayAdapter(
+                this@InstallActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                labels,
+            )
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long,
+                ) {
+                    if (mirrorSync) return
+                    // 0 = upstream (clear), 1..n = a preset, last = custom
+                    // (leave the text alone so the user can type).
+                    when {
+                        position == 0 -> setMirrorText("")
+                        position <= mirrorPresets.size -> setMirrorText(mirrorPresets[position - 1])
+                    }
+                }
+
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            }
+        }
+        mirrorSpinner = spinner
+        mirrorPresetRow.addView(spinner, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        updateMirrorHint()
+    }
+
+    /** [me.phie.tawc.install.distro.Distro.bootstrapMirrorPath] of the current pick. */
+    private fun currentMirrorPath(): String? =
+        DistroRegistry.availableForHost().firstOrNull { it.key == selectedDistro }?.bootstrapMirrorPath
+
+    /** Field write that the spinner's own listener shouldn't react to. */
+    private fun setMirrorText(text: String) {
+        mirrorSync = true
+        try {
+            mirrorField.setText(text)
+        } finally {
+            mirrorSync = false
+        }
+    }
+
+    /**
+     * Point the spinner at whichever entry the field's text corresponds
+     * to. Derived, never authoritative: "matches nothing" is exactly the
+     * "Custom…" entry, so this can't fight the user.
+     */
+    private fun syncMirrorSpinner() {
+        val spinner = mirrorSpinner ?: return
+        val text = BootstrapMirror.normalise(mirrorField.text.toString())
+        val index = when {
+            text.isEmpty() -> 0
+            else -> mirrorPresets.indexOf(text).let { if (it < 0) mirrorPresets.size + 1 else it + 1 }
+        }
+        if (spinner.selectedItemPosition == index) return
+        mirrorSync = true
+        try {
+            spinner.setSelection(index)
+        } finally {
+            mirrorSync = false
+        }
+    }
+
+    /**
+     * Refresh the preview line (and the spinner) from the current
+     * (distro, flavor, field) triple. An empty field and "this distro
+     * can't be mirrored" are both non-errors — they read as statements
+     * of what will happen, in the quiet variant colour; only a
+     * malformed URL is an error.
+     */
+    private fun updateMirrorHint() {
+        if (!::mirrorHint.isInitialized || !::mirrorField.isInitialized) return
+        val distro = DistroRegistry.availableForHost().firstOrNull { it.key == selectedDistro }
+        val prefix = distro?.bootstrapMirrorPrefix
+        val raw = mirrorField.text.toString()
+        val normalColor = mirrorHint.tawcSecondaryColor()
+
+        // Preview against the flavor the install would actually use, so
+        // the default (flavor-agnostic) case and the dev-only flavor
+        // radio agree with each other.
+        val descriptor = distro?.let {
+            val flavor = it.bootstrapFlavors.keys.firstOrNull { f -> f.id == selectedBootstrap }
+                ?: it.supportedFlavor
+            it.bootstrapFlavors[flavor]
+        }
+
+        val (text, isError) = when {
+            distro == null -> "" to false
+            prefix == null -> getString(
+                R.string.install_mirror_unavailable, distro.displayName,
+            ) to false
+            BootstrapMirror.normalise(raw).isEmpty() ->
+                getString(R.string.install_mirror_default, prefix) to false
+            else -> {
+                val rewritten = descriptor?.let { BootstrapMirror.apply(it, prefix, raw) }
+                // An unchanged descriptor means the rewrite refused the
+                // base (no scheme, or a URL not under the distro's root).
+                val url = rewritten?.takeIf { it !== descriptor }?.origin
+                if (url != null) {
+                    getString(R.string.install_mirror_applied, url) to false
+                } else {
+                    getString(R.string.install_mirror_invalid) to true
+                }
+            }
+        }
+        mirrorHint.text = text
+        mirrorHint.setTextColor(
+            if (isError) MaterialColors.getColor(mirrorHint, com.google.android.material.R.attr.colorError)
+            else normalColor,
+        )
+        syncMirrorSpinner()
     }
 
     /**
@@ -445,11 +648,11 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildInstallDirField(available: List<Distro>, savedLabelText: String?): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = getString(R.string.install_label_label); textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_label_label); tawcText(R.style.TextAppearance_Tawc_Body) }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         val initialDefault = available.firstOrNull { it.key == selectedDistro }?.defaultLabel ?: ""
-        labelField = EditText(this).apply {
+        labelField = tawcInput().apply {
             setText(savedLabelText ?: initialDefault)
             isSingleLine = true
             addTextChangedListener(object : TextWatcher {
@@ -468,10 +671,10 @@ class InstallActivity : AppCompatActivity() {
         // / unslugifiable / collides), it's the explanation in the
         // same slot. One line of feedback instead of two.
         locationLabel = TextView(this).apply {
-            textSize = 12f
+            tawcText(R.style.TextAppearance_Tawc_Caption)
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
-            setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant))
+            setTextColor(tawcSecondaryColor())
         }
         container.addView(locationLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         return container
@@ -512,12 +715,13 @@ class InstallActivity : AppCompatActivity() {
                 collides -> getString(R.string.install_already_installed_at, store.installationDir(slug).absolutePath)
                 else -> store.installationDir(slug).absolutePath
             }
-            val colorAttr = if (resolvedId == null) {
-                com.google.android.material.R.attr.colorError
-            } else {
-                com.google.android.material.R.attr.colorOnSurfaceVariant
-            }
-            locationLabel.setTextColor(MaterialColors.getColor(locationLabel, colorAttr))
+            locationLabel.setTextColor(
+                if (resolvedId == null) {
+                    MaterialColors.getColor(locationLabel, com.google.android.material.R.attr.colorError)
+                } else {
+                    locationLabel.tawcSecondaryColor()
+                },
+            )
         }
 
         if (::installButton.isInitialized) {
@@ -537,7 +741,7 @@ class InstallActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
         }
-        val count = TextView(this).apply { textSize = 14f }
+        val count = TextView(this).apply { tawcText(R.style.TextAppearance_Tawc_Body) }
         bindsCountLabel = count
         row.addView(count, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         row.addView(tonalButton(getString(R.string.action_manage)) {
@@ -551,7 +755,14 @@ class InstallActivity : AppCompatActivity() {
     }
 
     private fun updateBindsRow() {
-        bindsCountLabel?.text = getString(R.string.install_external_binds_label, pendingBinds.size)
+        bindsCountLabel?.text = getString(
+            if (bindsSeededFromHome) {
+                R.string.install_external_binds_auto_label
+            } else {
+                R.string.install_external_binds_label
+            },
+            pendingBinds.size,
+        )
         // Only tawcroot consumes the bind list; hide the row when the
         // user picks a debug method so the form doesn't promise binds
         // the spawn path would ignore. selectedMethod is always set
@@ -562,13 +773,18 @@ class InstallActivity : AppCompatActivity() {
     }
 
     /**
-     * ando toggle ([buildAndoToggleRow], notes/ando.md). Off by
+     * ando toggle ([buildToggleRow], notes/ando.md). Off by
      * default; drives [andoEnabled], passed to the service by
      * [beginInstall]. Shown for every method and build type — unlike
      * binds, ando applies to all install methods.
      */
     private fun buildAndoRow(): LinearLayout =
-        buildAndoToggleRow(this, andoEnabled) { _, checked -> andoEnabled = checked }
+        buildToggleRow(
+            this,
+            R.string.ando_toggle_label,
+            R.string.ando_toggle_description,
+            andoEnabled,
+        ) { _, checked -> andoEnabled = checked }
 
     /**
      * Dev-only "Use cache proxy" checkbox. Drives [useCacheProxy],
@@ -593,7 +809,7 @@ class InstallActivity : AppCompatActivity() {
      */
     private fun buildMethodPicker(): LinearLayout {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val title = TextView(this).apply { text = getString(R.string.install_method_label); textSize = 14f }
+        val title = TextView(this).apply { text = getString(R.string.install_method_label); tawcText(R.style.TextAppearance_Tawc_Body) }
         container.addView(title, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         methodGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
@@ -659,6 +875,13 @@ class InstallActivity : AppCompatActivity() {
 
         val distroKey = selectedDistro
         val labelText = labelField.text.toString().trim().takeIf { it.isNotEmpty() }
+
+        // Persist the mirror before handing off: [Installer] reads it
+        // from Settings, not from the service intent, because the same
+        // value has to apply to a re-install triggered from anywhere.
+        if (::mirrorField.isInitialized) {
+            me.phie.tawc.Settings.bootstrapMirror = mirrorField.text.toString().trim()
+        }
         // Dev-time cache proxy URL: when the (debug-only) checkbox is
         // on, use the standard local proxy URL; else null. Service-side
         // gates this on BuildConfig.DEBUG so a release APK ignores any
@@ -678,7 +901,10 @@ class InstallActivity : AppCompatActivity() {
                 this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl, bindsJson, andoEnabled,
                 selectedBootstrap,
             )
-            startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
+            // Hand control back to the setup screen, which renders the
+            // install inline. Opening LogScreenActivity here would be the
+            // jump the inline progress exists to remove — and it would
+            // leave the user on a screen they then have to back out of.
             finish()
         }
 
@@ -707,12 +933,12 @@ class InstallActivity : AppCompatActivity() {
         private const val DEFAULT_PROXY_URL = "http://127.0.0.1:8080/proxy/"
         private const val KEY_METHOD = "tawc.install.method"
         private const val KEY_DISTRO = "tawc.install.distro"
-        private const val KEY_OTHER_DISTROS = "tawc.install.otherDistrosExpanded"
         private const val KEY_LABEL_EDITED = "tawc.install.labelEdited"
         private const val KEY_LABEL_TEXT = "tawc.install.labelText"
         private const val KEY_USE_PROXY = "tawc.install.useCacheProxy"
         private const val KEY_BINDS = "tawc.install.externalBinds"
         private const val KEY_ANDO = "tawc.install.ando"
         private const val KEY_BOOTSTRAP = "tawc.install.bootstrap"
+        private const val KEY_MIRROR = "tawc.install.mirror"
     }
 }

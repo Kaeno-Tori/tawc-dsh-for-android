@@ -16,13 +16,7 @@ data class AppPaths(
     val cacheDir: File,
     val shareDir: File,
     val distrosDir: File,
-    val xwaylandDir: File,
-    val xkbDir: File,
 ) {
-    val xwaylandRuntimeDir: File get() = File(shareDir, "xtmp")
-    val waylandSocket: File get() = File(shareDir, "wayland-0")
-    val kumquatSocket: File get() = File(shareDir, "kumquat-gpu-0")
-
     /** Legacy single shared ando socket node (pre per-distro ando,
      *  notes/ando.md). No longer bound; app startup unlinks any stale
      *  node left by an older version. */
@@ -40,8 +34,6 @@ data class AppPaths(
                 cacheDir = cacheDir,
                 shareDir = File(dataDir, "share"),
                 distrosDir = File(dataDir, "distros"),
-                xwaylandDir = File(filesDir, "xwayland"),
-                xkbDir = File(filesDir, "xkb"),
             )
         }
     }

@@ -1,0 +1,8 @@
+# Issue chooser. Keep `blank_issues_enabled` false so nothing arrives with no
+# device/version context at all — the bug form asks for exactly what is needed
+# to act on a report, and has a "not sure" answer everywhere it can.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security issue (private)
+    url: https://github.com/Kaeno-Tori/tawc-dsh-for-android/security/advisories/new
+    about: Please do not open a public issue with exploit details — see SECURITY.md.

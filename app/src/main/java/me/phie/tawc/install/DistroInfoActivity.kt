@@ -22,7 +22,6 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import android.content.DialogInterface
-import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import me.phie.tawc.AndoBrokers
 import me.phie.tawc.R
@@ -38,6 +37,9 @@ import kotlinx.coroutines.runInterruptible
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.destructiveButton
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcInput
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.tonalButton
 import me.phie.tawc.ui.verticalLp
 
@@ -47,9 +49,9 @@ import me.phie.tawc.ui.verticalLp
  * to fill in size, and exposes the (red, destructive) Delete button
  * (Are-You-Sure dialog → [InstallationService.startUninstall] +
  * [me.phie.tawc.ops.LogScreenActivity] for the live progress view).
- * Reached by tapping a row on the home screen; size lives here (not
- * on the home list) so opening the launcher doesn't pay the multi-
- * second su cost per row.
+ * Reached from the DSH dock's container action. The size probe is a
+ * multi-second `su` round trip, so it runs here on demand rather than
+ * whenever some list is drawn.
  */
 class DistroInfoActivity : AppCompatActivity() {
 
@@ -81,7 +83,7 @@ class DistroInfoActivity : AppCompatActivity() {
         val installation = store.load(targetId)
         if (installation == null) {
             // Uninstall happened in a child activity while we were paused;
-            // there's nothing to show so back out to the home screen.
+            // there's nothing to show so back out to whatever launched us.
             finish()
             return
         }
@@ -107,9 +109,9 @@ class DistroInfoActivity : AppCompatActivity() {
 
     private fun renderContent(installation: Installation) {
         val resolvedDistro: Distro? = DistroRegistry.forInstallation(installation)
-        scaffold.toolbar.title = DistroRegistry.displayLabel(installation)
+        scaffold.header.title = DistroRegistry.displayLabel(installation)
 
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
         val content = scaffold.content
         content.removeAllViews()
 
@@ -178,7 +180,7 @@ class DistroInfoActivity : AppCompatActivity() {
             } else {
                 getString(R.string.distro_info_size_unavailable)
             }
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
             typeface = Typeface.MONOSPACE
         }
         content.addView(infoRowWithValue(getString(R.string.distro_info_row_size), sizeValue), rowLp(pad))
@@ -234,7 +236,7 @@ class DistroInfoActivity : AppCompatActivity() {
     }
 
     /**
-     * ando toggle row ([buildAndoToggleRow], notes/ando.md). Toggling
+     * ando toggle row ([buildToggleRow], notes/ando.md). Toggling
      * read-modify-writes [Installation.andoEnabled] through [store] on
      * [andoCommitExecutor] — single-threaded so rapid taps commit in
      * click order instead of racing each other — re-checking the state
@@ -246,8 +248,13 @@ class DistroInfoActivity : AppCompatActivity() {
      */
     private fun buildAndoRow(installation: Installation): LinearLayout {
         var reverting = false
-        return buildAndoToggleRow(this, installation.andoEnabled) { checkbox, checked ->
-            if (reverting) return@buildAndoToggleRow
+        return buildToggleRow(
+            this,
+            R.string.ando_toggle_label,
+            R.string.ando_toggle_description,
+            installation.andoEnabled,
+        ) { checkbox, checked ->
+            if (reverting) return@buildToggleRow
             andoCommitExecutor.execute {
                 // Gate + write atomically under the store's per-id lock:
                 // re-read inside [update] so a slot that slipped into
@@ -281,8 +288,8 @@ class DistroInfoActivity : AppCompatActivity() {
     }
 
     private fun showRunDialog(installation: Installation) {
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val input = EditText(this).apply {
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
+        val input = tawcInput().apply {
             hint = getString(R.string.hint_run_command)
             // URI variation kills Gboard autocorrect (which ignores
             // TYPE_TEXT_FLAG_NO_SUGGESTIONS) like the old VISIBLE_PASSWORD
@@ -296,7 +303,7 @@ class DistroInfoActivity : AppCompatActivity() {
             isSingleLine = true
             imeOptions = EditorInfo.IME_ACTION_GO
             typeface = Typeface.MONOSPACE
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
         }
         // Wrap so the EditText gets dialog-edge padding without
         // touching MaterialAlertDialog's own content insets.
@@ -316,9 +323,7 @@ class DistroInfoActivity : AppCompatActivity() {
         // makes Cancel look like a recommended path. Tone it down to
         // colorOnSurfaceVariant so Run reads as the action.
         dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.let { btn ->
-            btn.setTextColor(
-                MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
-            )
+            btn.setTextColor(btn.context.tawcSecondaryColor())
         }
         input.setOnEditorActionListener { _, actionId, event ->
             val isEnter = actionId == EditorInfo.IME_ACTION_GO ||
@@ -363,9 +368,7 @@ class DistroInfoActivity : AppCompatActivity() {
         // recommended path next to a red Delete.
         dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.tawc_danger))
         dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.let { btn ->
-            btn.setTextColor(
-                MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
-            )
+            btn.setTextColor(btn.context.tawcSecondaryColor())
         }
     }
 
@@ -397,9 +400,7 @@ class DistroInfoActivity : AppCompatActivity() {
     private fun copyButton(description: String, text: String): ImageButton =
         ImageButton(this).apply {
             setImageResource(R.drawable.ic_content_copy)
-            imageTintList = android.content.res.ColorStateList.valueOf(
-                MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
-            )
+            imageTintList = android.content.res.ColorStateList.valueOf(context.tawcSecondaryColor())
             val outValue = android.util.TypedValue()
             context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
             setBackgroundResource(outValue.resourceId)
@@ -438,14 +439,14 @@ class DistroInfoActivity : AppCompatActivity() {
     private fun infoRow(label: String, value: String): LinearLayout =
         infoRowWithValue(label, TextView(this).apply {
             text = value
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         })
 
     private fun infoRowWithValue(label: String, valueView: TextView): LinearLayout {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val l = TextView(this).apply { text = label; textSize = 14f }
+        val l = TextView(this).apply { text = label; tawcText(R.style.TextAppearance_Tawc_Body) }
         row.addView(l, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = 16 })
         row.addView(valueView, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         return row

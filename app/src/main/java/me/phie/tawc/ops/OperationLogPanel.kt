@@ -22,10 +22,12 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import me.phie.tawc.R
 import me.phie.tawc.ui.tawcCard
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.tonalButton
 
 /**
- * Reusable "operation in progress" UI: bold status line + accent-tinted
+ * Reusable "operation in progress" UI: emphasised status line + info-tinted
  * progress bar + scrolling log + subdued tonal Cancel button.
  *
  * Owners attach [view] into their layout, then call [bind] with an
@@ -46,46 +48,63 @@ class OperationLogPanel(private val activity: Activity) {
     val view: LinearLayout
     private val statusText: TextView
     private val progressBar: ProgressBar
+    private val stepsColumn: LinearLayout
     private val logText: TextView
     private val logScroll: ScrollView
     private val cancelButton: MaterialButton
 
     private var collectScope: CoroutineScope? = null
 
+    /** Step names the rendered checklist was built from, to avoid rebuilding
+     *  six TextViews on every progress emit. */
+    private var renderedSteps: List<String> = emptyList()
+    private var stepRows: List<Pair<TextView, TextView>> = emptyList()
+
     /** The currently bound op, or `null`. Owners may read this from [onCancelClicked]. */
     var boundOperation: Operation? = null
         private set
 
     /**
-     * Tap handler for the Cancel button. The default just calls
-     * [Operation.cancel] on [boundOperation]; owners can override to
-     * wrap with a confirm dialog (driven by [Operation.cancelConfirmation]).
+     * Tap handler for the Cancel button.
+     *
+     * **Inert until an owner sets it.** The panel deliberately has no
+     * default: whether a cancel needs a confirm dialog is a property of
+     * the operation ([Operation.cancelConfirmation]), and for an install
+     * the answer is yes — an unconfirmed tap wipes the rootfs. Owners
+     * route it through `confirmAndCancel`; [LogScreenActivity] and
+     * [me.phie.tawc.MainActivity] both do.
      */
     var onCancelClicked: (() -> Unit)? = null
 
     init {
-        val pad = (16 * activity.resources.displayMetrics.density).toInt()
-        val accent = activity.getColor(R.color.tawc_accent)
+        val pad = activity.resources.getDimensionPixelSize(R.dimen.tawc_space_l)
+        val info = activity.getColor(R.color.tawc_info)
 
         view = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
 
         statusText = TextView(activity).apply {
             text = ""
-            setTypeface(typeface, Typeface.BOLD)
+            tawcText(R.style.TextAppearance_Tawc_BodyStrong)
         }
         view.addView(statusText, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 2))
 
         progressBar = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
-            indeterminateTintList = ColorStateList.valueOf(accent)
-            progressTintList = ColorStateList.valueOf(accent)
+            indeterminateTintList = ColorStateList.valueOf(info)
+            progressTintList = ColorStateList.valueOf(info)
         }
         view.addView(progressBar, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
+
+        // Checklist, between the bar and the log. Empty (and so zero-height)
+        // for operations that don't declare steps, which keeps this panel
+        // usable for the ops that only have a status line.
+        stepsColumn = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        view.addView(stepsColumn, lp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad))
 
         logScroll = ScrollView(activity)
         logText = TextView(activity).apply {
             typeface = Typeface.MONOSPACE
-            textSize = 11f
+            tawcText(R.style.TextAppearance_Tawc_CaptionSmall)
             // setTextIsSelectable installs ArrowKeyMovementMethod, which is
             // what makes long-press select + copy work. Don't override it
             // with ScrollingMovementMethod — the wrapping ScrollView already
@@ -96,8 +115,8 @@ class OperationLogPanel(private val activity: Activity) {
         }
         logScroll.addView(logText)
         // Wrap the log in a card so it reads as its own panel against
-        // the screen background — same fill/no-stroke treatment as the
-        // home screen's distro cards and the task manager.
+        // the screen background — the same fill/no-stroke block as the
+        // task manager's process-detail dialog.
         val logCard = activity.tawcCard().apply { addView(logScroll) }
         view.addView(logCard, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
@@ -172,7 +191,87 @@ class OperationLogPanel(private val activity: Activity) {
         val terminal = p.stage.isTerminal || p.stage == OperationStage.IDLE
         progressBar.visibility = if (terminal) View.GONE else View.VISIBLE
         cancelButton.visibility = if (terminal) View.GONE else View.VISIBLE
+        applySteps(p)
     }
+
+    /**
+     * Paint the step checklist.
+     *
+     * The rows are built once per distinct step list ([renderedSteps]) and
+     * then only re-marked, because progress emits arrive at high frequency
+     * during a download and re-inflating six TextViews per emit would be
+     * the most expensive thing on the screen.
+     *
+     * The two states that matter and aren't obvious: [OperationProgress.currentStep]
+     * is `steps.size` on success (nothing is "current", everything is
+     * done), and on failure the position stays at the step that threw — so
+     * the danger mark lands on the step that actually failed rather than
+     * on nothing.
+     */
+    private fun applySteps(p: OperationProgress) {
+        if (p.steps != renderedSteps) {
+            stepsColumn.removeAllViews()
+            stepRows = p.steps.map { name ->
+                val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+                val mark = TextView(activity).apply {
+                    typeface = Typeface.MONOSPACE
+                    // Fixed width: "✓", "▶" and "·" don't render at the
+                    // same advance width, so without this the names
+                    // below would not line up.
+                    width = markWidthPx
+                    includeFontPadding = false
+                }
+                val label = TextView(activity).apply {
+                    text = name
+                    tawcText(R.style.TextAppearance_Tawc_BodySmall)
+                    includeFontPadding = false
+                }
+                row.addView(mark)
+                row.addView(label, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                stepsColumn.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                mark to label
+            }
+            renderedSteps = p.steps
+        }
+        if (p.steps.isEmpty()) return
+
+        val success = activity.getColor(R.color.tawc_success)
+        val info = activity.getColor(R.color.tawc_info)
+        val danger = activity.getColor(R.color.tawc_danger)
+        val onSurface = MaterialColors.getColor(
+            stepsColumn, com.google.android.material.R.attr.colorOnSurface,
+        )
+        val muted = stepsColumn.tawcSecondaryColor()
+
+        stepRows.forEachIndexed { i, (mark, label) ->
+            val done = i < p.currentStep
+            val current = i == p.currentStep
+            val failed = current && p.stage == OperationStage.FAILED
+            mark.text = when {
+                failed -> "✗"
+                done -> "✓"
+                current -> "▶"
+                else -> "·"
+            }
+            mark.setTextColor(
+                when {
+                    failed -> danger
+                    current -> info
+                    done -> success
+                    else -> muted
+                },
+            )
+            label.setTextColor(if (done || current) onSurface else muted)
+            // DSH has no bold; the "this one is running" emphasis is the
+            // 500 weight of the same size, not a heavier step.
+            label.tawcText(
+                if (current) R.style.TextAppearance_Tawc_BodyStrong else R.style.TextAppearance_Tawc_Body,
+            )
+        }
+    }
+
+    private val markWidthPx: Int =
+        activity.resources.getDimensionPixelSize(R.dimen.tawc_space_l)
 
     /**
      * Clear the rendered log + status. Used by viewers that swap the
@@ -183,6 +282,9 @@ class OperationLogPanel(private val activity: Activity) {
     fun reset() {
         statusText.text = ""
         logText.text = ""
+        stepsColumn.removeAllViews()
+        renderedSteps = emptyList()
+        stepRows = emptyList()
         progressBar.isIndeterminate = true
         progressBar.progress = 0
         progressBar.visibility = View.GONE
@@ -206,7 +308,7 @@ class OperationLogPanel(private val activity: Activity) {
     }
 
     private val hangingIndentPx: Int =
-        (16 * activity.resources.displayMetrics.density).toInt()
+        activity.resources.getDimensionPixelSize(R.dimen.tawc_space_l)
 
     private fun lp(w: Int, h: Int, bottomMargin: Int = 0): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(w, h).also { it.bottomMargin = bottomMargin }

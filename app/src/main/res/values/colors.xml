@@ -1,38 +1,131 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  App accent + danger colors. The accent is a warm orange
-  used for primary actions (Install, Open, etc.). Danger is a saturated
-  red used for destructive actions (Uninstall). Both have day/night
-  variants — see values-night/colors.xml.
+  The app's palette, taken from DSH's own design tokens.
+
+  (`dsw-*` below are the web client's CSS custom properties, written
+  here without their leading double-dash.)
+
+  Every value here is copied from the web client's `dsw-alias-*` layer
+  (defined in `@deepseek-ai/dsh-client-ui-theme`'s client bundle, which
+  resolves onto the `dsw-static-neutral-bluish-*` scale). The native
+  screens sit next to DSH's page in the same window, so they have to
+  speak the same palette — an app-orange accent next to a black-cap
+  DSH button was the single loudest tell that these were two products.
+
+  The mapping, name by name (light value; values-night/colors.xml has
+  the dark half):
+
+    tawc_accent          button-primary-fill  = brand-primary = neutral-bluish-1000
+    tawc_on_accent       label-primary-foreground
+    tawc_info            state-business-primary = link = deepseek-500
+    tawc_danger          state-error-primary
+    tawc_warning         state-warn-label
+    tawc_success         state-success-primary
+    tawc_window_bg       bg-base
+    tawc_card_bg         bg-layer-1
+    tawc_tonal_bg        bg-module-platform
+    tawc_divider         border-l2
+    tawc_outline         border-l4
+    tawc_ripple          interactive-bg-hover
+    tawc_label_*         label-primary / -secondary / -tertiary / -caption
+
+  Two deliberate non-mappings:
+
+   - DSH has no card *fill* — a block is `bg-base` bounded by a hairline.
+     `tawc_card_bg` is `bg-layer-1` anyway, which is identical to the page
+     in light mode (the hairline does the work) and one step up in dark
+     (bg-layer-1 = neutral-bluish-875 over a -950 page).
+   - `tawc_terminal_*` are ours, not DSH's: the terminal surface is black
+     in both themes on purpose (see below).
 -->
 <resources>
-    <color name="tawc_accent">#FF621F</color>
+    <!-- Filled actions. DSH's primary is a near-black cap in light mode and
+         inverts to near-white in dark; it is not a brand colour. -->
+    <color name="tawc_accent">#0F1115</color>
+    <color name="tawc_on_accent">#FFFFFF</color>
 
-    <color name="tawc_danger">#C62828</color>
+    <!-- Links, spinners, "this is live" text: DSH's deepseek blue. -->
+    <color name="tawc_info">#4176E6</color>
+
+    <color name="tawc_danger">#EC1313</color>
     <color name="tawc_on_danger">#FFFFFF</color>
 
-    <!-- Warning yellow for cautionary text (e.g. the storage-binds
-         data-safety note). Dark mustard so it reads on the light
-         surfaces; values-night brightens it. -->
-    <color name="tawc_warning">#8F6F00</color>
+    <!-- Cautionary text (e.g. the storage-binds data-safety note). -->
+    <color name="tawc_warning">#DD8629</color>
 
-    <!-- Success green for terminal "operation finished" status text. Sits
-         in the same family as Material's tertiary green; tuned to read
-         as a clear positive on both the light and dark surfaces without
-         shouting. The dark-theme override in values-night brightens it
-         for contrast against the dark background. -->
-    <color name="tawc_success">#149519</color>
+    <!-- Terminal "operation finished" status text. -->
+    <color name="tawc_success">#22C55E</color>
 
-    <!-- Window background. Light neutral page behind white cards. -->
-    <color name="tawc_window_bg">#F3F3F3</color>
+    <!-- Window background = the page itself. -->
+    <color name="tawc_window_bg">#FFFFFF</color>
 
-    <!-- Card / panel surface. White surface from the mockup. -->
+    <!-- Block / panel surface. -->
     <color name="tawc_card_bg">#FFFFFF</color>
 
-    <!-- Tonal (subdued) button colors — Cancel, Manage, Task manager.
-         Light neutral grey in the same family as the surfaces, black text;
-         visually subordinate to the accent (which is the only chromatic
-         button on the page). -->
-    <color name="tawc_tonal_bg">#D5D4D2</color>
-    <color name="tawc_on_tonal">#000000</color>
+    <!-- Subdued button fill (Cancel, Manage, Task manager). -->
+    <color name="tawc_tonal_bg">#F5F6F7</color>
+    <color name="tawc_on_tonal">#0F1115</color>
+
+    <!-- Text. DSH's four steps; the gradient from primary to caption is what
+         makes its dense screens readable without bold or size changes. -->
+    <color name="tawc_label_primary">#0F1115</color>
+    <color name="tawc_label_secondary">#61666B</color>
+    <color name="tawc_label_tertiary">#81858C</color>
+    <color name="tawc_label_caption">#ADB2B8</color>
+
+    <!-- Hairline: block outlines and row separators. DSH draws these at
+         0.5px in CSS; on Android `tawc_hairline` (1px) is the same optical
+         weight on every density.
+
+         Note the byte order: the web writes these as CSS `#rrggbbaa`,
+         Android reads them as `#aarrggbb`. DSH's `#0000001a` is black at
+         10%, i.e. `#1A000000` here — copied over verbatim it would be a
+         fully transparent black, which is how every separator in this app
+         came out invisible at first. -->
+    <color name="tawc_divider">#1A000000</color>
+
+    <!-- Slightly stronger outline, for inputs (DSH `#00000029`). -->
+    <color name="tawc_outline">#29000000</color>
+
+    <!-- border-l3 (`#0000001f`): the border on an outlined button, a step
+         stronger than the hairline. -->
+    <color name="tawc_border_l3">#1F000000</color>
+
+    <!-- button-floating-fill: the surface for a button that floats over
+         content rather than sitting on it (the DSH tools dot). -->
+    <color name="tawc_floating_bg">#FFFFFF</color>
+
+    <!-- Press state. DSH's hover/active wash is blue-tinted rather than
+         neutral grey — `#263148` at 6% — which is why its UI feels cool
+         even in places with no colour in them. (`#2631480f` in the web's
+         order, so `#0F263148` here.) -->
+    <color name="tawc_ripple">#0F263148</color>
+
+    <!-- Terminal chrome. The terminal surface is black in both themes (a
+         light terminal is a different product), so these deliberately do not
+         flip, and values-night/colors.xml does not restate them. -->
+    <color name="tawc_terminal_bg">#1A1A1A</color>
+    <color name="tawc_terminal_tab_selected">#404040</color>
+    <color name="tawc_terminal_fg_selected">#FFFFFF</color>
+    <color name="tawc_terminal_fg_unselected">#9E9E9E</color>
+
+    <!--
+      DSH's boot-splash palette, copied verbatim from the web client's
+      `_boot_u7vgf_3` CSS module (light block). These were already DSH
+      tokens before the rest of the app was; they need no mapping.
+
+      `dsh_boot_bg` doubles as the *on-brand* text colour — on both themes
+      it is the contrast partner of `dsh_boot_brand` (the wordmark and the
+      spinner's arc), which is how the filled button gets black-on-light /
+      white-on-dark for free.
+
+      values-night swaps all six; see that file.
+    -->
+    <color name="dsh_boot_bg">#FFFFFFFF</color>
+    <color name="dsh_boot_brand">#FF0F1115</color>
+    <!-- rgb(0 0 0 / 10%) — the 2dp spinner ring and the outlined button. -->
+    <color name="dsh_boot_border">#1A000000</color>
+    <color name="dsh_boot_label_primary">#FF0F1115</color>
+    <color name="dsh_boot_label_secondary">#FF61666B</color>
+    <color name="dsh_boot_label_tertiary">#FF81858C</color>
 </resources>

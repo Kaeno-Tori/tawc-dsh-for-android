@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in tawc-dsh does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things worth knowing before you file this:
+
+        * **This is early software.** Version 0.1, reliability not established
+          (see the README's Limitations). Please read those first — several
+          oddities are deliberate.
+        * **A tablet is the recommended device.** DSH's interface is
+          desktop-shaped and cramped on a phone; it runs, but it is not the
+          good experience.
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: e.g. Xiaomi Pad 6, Android 15 (API 35)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: tawc-dsh version
+      description: Settings → About, or the release tag you installed
+      placeholder: e.g. 0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: container
+    attributes:
+      label: Container
+      options:
+        - Arch Linux ARM
+        - Debian sid
+        - Nothing installed yet (the problem is during install)
+    validations:
+      required: true
+  - type: dropdown
+    id: graphics
+    attributes:
+      label: Graphics backend (Settings → Vulkan)
+      options:
+        - Turnip (Mesa freedreno)
+        - System (device vendor driver)
+        - Off
+        - Not sure / not relevant
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: |
+        What you expected, what happened instead, and the steps that get there.
+        If the DSH interface never appears, say how far it gets (distribution
+        download / install / WebView) — those fail in different places.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `adb logcat -s tawc` for the app, `adb logcat -s tawc-native` for the
+        Rust side. Logs from the run that failed are worth more than a
+        description of it.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read the README's Limitations section.
+          required: true
+        - label: This is not a security issue (those go to SECURITY.md, privately).
+          required: true

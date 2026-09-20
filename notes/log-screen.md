@@ -34,6 +34,46 @@ adding a new kind of operation doesn't touch any UI code.
   the notification center observes its progress and posts /
   updates / cancels the notification with no per-op code.
 
+## The registry is memory; some work is not
+
+Every convention above assumes the process outlives the operation.
+Nothing in this package can survive a killed process, and for most ops
+that is the whole story — the work died with it, so there is nothing
+left to be inconsistent with.
+
+Install/uninstall are the exception, because they persist their
+in-flight state somewhere else. [InstallationStore] writes
+`INSTALLING`/`UNINSTALLING` into `<id>/metadata.json`, while the
+operation that owns that state lives only in [OperationsRegistry]. Kill
+the process mid-install (LMK, swipe-away, crash, reboot) and the two
+disagree permanently.
+
+That is not merely cosmetic, because [me.phie.tawc.MainActivity] derives
+its *screen* from the record: it reads `INSTALLING`, renders the progress
+page, and then has no way off it —
+
+  - `bindOp` finds no operation, so the panel is empty and
+    `boundOperation` is null; the Cancel button stays visible (its
+    visibility tracks the panel's terminal flag, which `unbind` does not
+    touch) and does nothing when tapped.
+  - Starting over is refused: [InstallationService] rejects an id whose
+    state is `INSTALLING`.
+  - The one transition the state machine allows *out* of `INSTALLING` is
+    uninstall, and that entry point lives in
+    [me.phie.tawc.install.DistroInfoActivity], which
+    [me.phie.tawc.MainActivity] cannot reach.
+
+So the stale record has to be reconciled, and the only safe moment is
+process start — see [me.phie.tawc.install.InterruptedInstalls], which
+runs from [me.phie.tawc.TawcApplication]'s startup thread and rewrites
+those records to `FAILED`. "The registry has no such operation" would be
+a racy test in general; at process start it is true by construction.
+Worth re-reading that file's KDoc before changing the order of
+register-vs-state-write in [InstallationService], because two orderings
+in there are load-bearing for it: the op is registered *before*
+`INSTALLING` is written, and the terminal state is written *before* the
+op is unregistered.
+
 ## Adding a new kind of operation
 
 1. Implement [Operation], or use the default [me.phie.tawc.ops.MutableOperation]

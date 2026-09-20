@@ -1,28 +1,77 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Dark-theme overrides. The accent shifts to a deeper orange in night mode;
-     danger stays the same deep red because white-on-deep-red works on
-     both light and dark surfaces. -->
+<!--
+  Dark half of the DSH palette. See values/colors.xml for the name-by-name
+  mapping onto the web client's `dsw-alias-*` layer; this file is that
+  layer's `body[data-ds-dark-theme]` block.
+
+  Only the role colours appear here. The `dsw-static-*` scale underneath
+  them is (with a couple of unused exceptions) theme-invariant, and the two
+  palettes that are deliberately fixed — `tawc_terminal_*` and the
+  `dsh_boot_*` splash — keep their own values in the file below.
+-->
 <resources>
-    <color name="tawc_accent">#B93710</color>
-    <!-- Brighter green for dark mode so the "Installed" / "Deleted"
-         status reads cleanly on the dark surface. -->
-    <color name="tawc_success">#3BE646</color>
-    <!-- Brighter warning yellow for dark surfaces. -->
-    <color name="tawc_warning">#FFD54F</color>
+    <!-- brand-primary: DSH's dark-mode primary action is a near-white cap
+         with near-black text, the exact inverse of the light theme. -->
+    <color name="tawc_accent">#F9FAFB</color>
+    <color name="tawc_on_accent">#0F1115</color>
 
-    <!-- Window background. Lifted off pure-black towards a neutral
-         dark grey so cards (which are darker) recess into the page.
-         Compositor's BACKGROUND_COLOR mirrors this — keep them in
-         sync. -->
-    <color name="tawc_window_bg">#1B1B22</color>
+    <!-- link / state-business-primary → deepseek-400 -->
+    <color name="tawc_info">#679EFE</color>
 
-    <!-- Card / panel surface. Darker than the window background — the
-         page is the "elevated" surface; cards are wells in it. -->
-    <color name="tawc_card_bg">#0D0D13</color>
+    <!-- state-error-primary → red-400. Text on it is near-black: #F25A5A is
+         a light red, and white on it would sit at ~2.7:1. -->
+    <color name="tawc_danger">#F25A5A</color>
+    <color name="tawc_on_danger">#0F1115</color>
 
-    <!-- Tonal (subdued) button colors — Cancel, Manage, Task manager.
-         Plain mid-grey, white text; visually subordinate to the accent
-         (which is the only chromatic button on the page). -->
-    <color name="tawc_tonal_bg">#3A363D</color>
-    <color name="tawc_on_tonal">#FFFFFF</color>
+    <!-- state-warn-label → amber-600. DSH does not brighten this one in dark
+         mode; it stays the same mustard the light theme uses. -->
+    <color name="tawc_warning">#DD8629</color>
+
+    <!-- state-success-primary → green-500, unchanged between themes. -->
+    <color name="tawc_success">#22C55E</color>
+
+    <!-- bg-base → neutral-bluish-950. -->
+    <color name="tawc_window_bg">#151517</color>
+
+    <!-- bg-layer-1 → neutral-bluish-875: one step up from the page, which is
+         what keeps a block readable when its fill is no longer white. -->
+    <color name="tawc_card_bg">#232324</color>
+
+    <!-- bg-module-platform → neutral-bluish-800 -->
+    <color name="tawc_tonal_bg">#353638</color>
+    <color name="tawc_on_tonal">#F9FAFB</color>
+
+    <!-- label-primary / -secondary / -tertiary / -caption → -50 / -300 / -400 / -600 -->
+    <color name="tawc_label_primary">#F9FAFB</color>
+    <color name="tawc_label_secondary">#CFD3D6</color>
+    <color name="tawc_label_tertiary">#ADB2B8</color>
+    <color name="tawc_label_caption">#81858C</color>
+
+    <!-- border-l2 / border-l4, white at the same alphas the light side uses
+         black at. The web writes these as CSS `#rrggbbaa`; Android is
+         `#aarrggbb`, so the alpha byte moves to the front. -->
+    <color name="tawc_divider">#1FFFFFFF</color>
+    <color name="tawc_outline">#33FFFFFF</color>
+
+    <!-- border-l3 (`#ffffff29`), the outlined button's border. -->
+    <color name="tawc_border_l3">#29FFFFFF</color>
+
+    <!-- button-floating-fill → neutral-bluish-850 -->
+    <color name="tawc_floating_bg">#2C2C2E</color>
+
+    <!-- interactive-bg-hover. In dark DSH drops the blue tint and uses plain
+         white at 8%: over a near-black page there is no tint to correct. -->
+    <color name="tawc_ripple">#14FFFFFF</color>
+
+    <!-- DSH boot splash, dark block: the same six tokens from the web
+         client's `body[data-ds-dark-theme]` rule. Note the brand flips to
+         near-white, so the filled button becomes white-on-dark — see the
+         palette comment in values/colors.xml. -->
+    <color name="dsh_boot_bg">#FF151517</color>
+    <color name="dsh_boot_brand">#FFF9FAFB</color>
+    <!-- rgb(255 255 255 / 12%) -->
+    <color name="dsh_boot_border">#1FFFFFFF</color>
+    <color name="dsh_boot_label_primary">#FFF9FAFB</color>
+    <color name="dsh_boot_label_secondary">#FFCFD3D6</color>
+    <color name="dsh_boot_label_tertiary">#FFADB2B8</color>
 </resources>

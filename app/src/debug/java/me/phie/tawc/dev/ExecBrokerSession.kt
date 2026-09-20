@@ -5,7 +5,6 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import me.phie.tawc.GraphicsBackend
-import me.phie.tawc.install.UserRootfsSession
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -50,7 +49,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
         /**
          * Run a command inside an installed chroot. The broker reads
          * the install's recorded method from `metadata.json`,
-         * dispatches to [UserRootfsSession.startInside], and streams
+         * dispatches to [me.phie.tawc.install.InstallationMethod.startInside], and streams
          * stdio back exactly like [Exec]. Single entry point for every
          * "enter the chroot" path — replaces the prior on-disk
          * `enter.sh` + ARGV-form Exec dance.
@@ -88,7 +87,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
 
     /**
      * Resolve the install's method via metadata.json and start the
-     * subprocess via [UserRootfsSession.startInside]. The streaming /
+     * subprocess via [me.phie.tawc.install.InstallationMethod.startInside]. The streaming /
      * cancel / waitFor scaffolding is shared with [runExec] via
      * [streamProcess] — only the spawn primitive differs.
      */
@@ -107,7 +106,10 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
         }
         val rootfs = store.rootfsDir(req.installId).absolutePath
         val proc: Process = try {
-            UserRootfsSession.startInside(app, method, rootfs, req.cmd, req.graphics)
+            // Straight to the install method: no compositor to bring up
+            // (the display stack is gone), and `req.graphics` still
+            // pins the backend for this one spawn.
+            method.startInside(rootfs, req.cmd, req.graphics)
         } catch (t: Throwable) {
             sendErrorAndExit(sout, "startInside: ${t.javaClass.simpleName}: ${t.message}")
             return
@@ -416,7 +418,7 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
      *   - **RUNINSIDE-form** (chroot dispatch): one `RUNINSIDE <id>`
      *     line plus an optional `CMD <command>` line and an optional
      *     `GRAPHICS <backend-key>` line. The session resolves the
-     *     install's method, calls [UserRootfsSession.startInside], and
+     *     install's method, calls [me.phie.tawc.install.InstallationMethod.startInside], and
      *     streams stdio. `CMD` absent = interactive `bash -l`.
      *     `GRAPHICS` absent = use the user's [me.phie.tawc.Settings]
      *     pick; present = override for this one spawn (tests use this
@@ -481,10 +483,10 @@ internal class ExecBrokerSession(private val socket: LocalSocket) {
                 "GRAPHICS" -> {
                     // RUNINSIDE-only: per-spawn override of the in-rootfs
                     // graphics backend. `null` (header absent) means
-                    // "use Settings.graphicsBackend" — the UI pick. Tests
-                    // pass an explicit value via tawc-exec's --graphics
-                    // flag to exercise one backend without flipping the
-                    // global pref.
+                    // "use RootfsEnv.defaultBackend()" — i.e. whatever the
+                    // settings screen's Vulkan pick derives. Tests pass an
+                    // explicit value via tawc-exec's --graphics flag to
+                    // exercise one backend without moving that pick.
                     if (runInsideGraphics != null) throw IOException("duplicate GRAPHICS line")
                     if (value.isEmpty()) throw IOException("GRAPHICS needs a backend key")
                     runInsideGraphics = GraphicsBackend.entries.firstOrNull { it.key == value }

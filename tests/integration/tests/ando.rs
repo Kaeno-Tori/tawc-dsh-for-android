@@ -171,7 +171,7 @@ fn test_ando_cwd_travels_as_fd() {
     let (rc, out, _) = run("cd /usr/share/tawc && ando sh -c pwd");
     assert_eq!(rc, 0);
     assert!(
-        out.ends_with("/me.phie.tawc/share"),
+        out.ends_with("/io.github.kaeno_tori.tawc_dsh/share"),
         "expected bind source of /usr/share/tawc, got {out:?}"
     );
 }

@@ -6,6 +6,7 @@ import android.util.Log
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import me.phie.tawc.BuildConfig
 
 /**
  * Dev-only socket-based exec broker. Lets the host run commands as the
@@ -28,7 +29,19 @@ import kotlin.concurrent.thread
  */
 object ExecBroker {
     const val TAG = "tawc-exec"
-    const val SOCKET_NAME = "me.phie.tawc.exec"
+
+    /**
+     * Abstract socket name, derived from the application id rather than
+     * spelled out: the upstream app also binds its broker under
+     * `<its-id>.exec`, and two installs of the same tree under different
+     * application ids must not race for one name. Deriving it means a
+     * rename cannot leave one side behind.
+     *
+     * Read by the host through `adb forward … localabstract:<name>`; see
+     * `tests/integration/src/exec_broker.rs`, which carries the same
+     * derivation.
+     */
+    val SOCKET_NAME: String = BuildConfig.APPLICATION_ID + ".exec"
 
     // shell (2000) covers `adb shell` and adbd-forwarded connections;
     // root (0) covers `su -c` and userdebug adbd. Other apps run as

@@ -1,0 +1,25 @@
+[package]
+name = "andobridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# JNI surface for the ando broker, and nothing else.
+#
+# Why a shared library of its own: `System.loadLibrary` loads a whole
+# .so, so the broker would otherwise pay for whatever else the app links
+# natively, at every app start. The broker logic itself lives in the
+# `ando-broker` rlib, which this crate links, so there is exactly one
+# implementation and this crate stays a thin JNI shell. See
+# notes/ando.md "Components".
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The broker + the process-wide logging setup. Note this is an rlib
+# dependency, not the `andobridge`/`libandobridge.so` output below — the
+# names differ deliberately: `ando-broker` is the logic, this crate is
+# its Android binding.
+ando-broker = { path = "../ando-broker" }
+jni = "0.21"
+log = "0.4"

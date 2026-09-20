@@ -76,7 +76,7 @@ extract-to-plain-directory mode. Open questions:
 - Whether FEXServer is still required with a directory RootFS (it also
   serves logging/config duties) and whether it behaves under tawcroot.
 - Which image: FEX's official Ubuntu images vs building our own from
-  the x86_64 bootstraps the installer already knows (Arch/Void/Debian
+  the x86_64 bootstraps the installer already knows (Arch/Debian
   x86_64 exist in `DistroRegistry` for the emulator). Our own is
   attractive (same distro family inside and out, cache-proxy-friendly,
   no dependency on FEX's image server); their official images are
@@ -113,35 +113,34 @@ these needs a deliberate check on device:
 
 ### 5. Graphics
 
-Explicitly conservative, per current project direction (gfxstream is
-disabled in prod and NOT part of this plan):
-- **Baseline (correctness): guest x86_64 llvmpipe** from the RootFS
-  rendering into SHM wl_buffers. Pure emulated software rendering; no
-  new integration, expected slow. This is the bring-up target.
+Explicitly conservative, and now display-free: this fork has no compositor
+and no display stack (gfxstream, Xwayland, libhybris-zink all went with
+it), so there is no surface to present to.
+- **Baseline (correctness): guest x86_64 llvmpipe** from the RootFS,
+  rendering offscreen. Pure emulated software rendering; no new
+  integration, expected slow. This is the bring-up target.
 - **Fast path candidate: FEX thunks → libhybris.** FEX's library
   forwarding redirects guest GL/Vulkan calls to native arm64 host
-  libs — in our rootfs, the hybris EGL/GLES wrappers. Uncertainties to
-  investigate before committing: which libraries FEX ships thunks for
-  (EGL/GLES vs desktop GL/GLX/Vulkan coverage), whether thunk host
-  libs tolerate hybris's non-Mesa EGL, thunk build requirements (host
-  sysroot at build time), and Wayland-platform EGL through a thunked
-  boundary. Treat as a separate investigation gated on core FEX
-  working.
-- If gfxstream is ever proven in prod, an x86_64 gfxstream-vk guest
-  driver speaking the wire protocol would cross the ISA boundary for
-  free — noted for the future, not planned here.
+  libs — in our rootfs, the hybris wrappers. Uncertainties to investigate
+  before committing: which libraries FEX ships thunks for (EGL/GLES vs
+  desktop GL/GLX/Vulkan coverage), whether thunk host libs tolerate
+  hybris's non-Mesa libs, and thunk build requirements (host sysroot at
+  build time). Offscreen only — there is no WSI path any more. Treat as a
+  separate investigation gated on core FEX working.
+- gfxstream is gone in this fork, so an x86_64 gfxstream-vk guest driver
+  is no longer a future option.
 
 ### 6. Bring-up ladder
 
 Static x86_64 hello-world → dynamic hello-world → syscall-heavy CLI
-(`git status`, `python`) → SHM Wayland client (`weston-terminal`-ish)
-→ llvmpipe GL client → (separately) thunk experiments.
+(`git status`, `python`) → headless llvmpipe/GL compute workload
+→ (separately) thunk experiments.
 
 ## Stretch: whole-x86_64-distro UX
 
 With per-program FEX working, "an x86_64 distro on the phone" is
 mostly UX: the FEX RootFS *is* a full x86_64 distro; make it the
-user-visible world (default shell/launcher entries exec through
+user-visible world (default shell entries exec through
 FEXInterpreter). Known field warning: FEXDroid explicitly routes
 apt/dpkg through qemu because package managers misbehave under FEX in
 proot setups — whether that's FEX's fault or proot jank is exactly
@@ -159,7 +158,7 @@ for initial landing.
 
 ## Out of scope
 
-- gfxstream-based acceleration (until gfxstream is proven in prod).
+- gfxstream-based acceleration (the backend was removed in this fork).
 - 32-bit x86 in the first pass (design for it, don't build it).
 - Wine/Windows programs (FEX's arm64ec Wine story is a different
   stack entirely).

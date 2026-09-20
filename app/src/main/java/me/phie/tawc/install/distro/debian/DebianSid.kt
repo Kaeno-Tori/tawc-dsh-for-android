@@ -75,11 +75,19 @@ internal sealed class DebianSid(
 
     final override val basePackages: List<String> = AptCommon.DEFAULT_BASE_PACKAGES
 
+    final override val runtimePackages: List<String> = AptCommon.RUNTIME_PACKAGES
+
     final override fun configure(
         method: InstallationMethod,
         rootfs: String,
         mirrorProxy: MirrorProxy?,
         log: (String) -> Unit,
+        // Ignored: [AptCommon] pins one archive URL, and Debian's mirror
+        // story (a `deb.debian.org` CDN + a signed InRelease) has no
+        // equivalent of a per-host `/os/` directory to measure. The
+        // bootstrap probe still applies to this distro — see
+        // `Distro.bootstrapMirrorPath`.
+        @Suppress("UNUSED_PARAMETER") mirrorBases: List<String>,
     ) = AptCommon.configure(
         method = method,
         rootfs = rootfs,
@@ -93,8 +101,12 @@ internal sealed class DebianSid(
     final override fun initPackageManager(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
         AptCommon.initPackageManager(method, rootfs, log)
 
-    final override fun installBasePackages(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
-        AptCommon.installBasePackages(method, rootfs, basePackages, log)
+    final override fun installPackages(
+        method: InstallationMethod,
+        rootfs: String,
+        packages: List<String>,
+        log: (String) -> Unit,
+    ) = AptCommon.installPackages(method, rootfs, packages, log)
 
     companion object {
         private const val SUITE = "sid"

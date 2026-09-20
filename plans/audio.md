@@ -3,6 +3,14 @@
 This is the planned direction for Linux app audio in tawc. No production
 audio bridge exists yet.
 
+> **Status: shelved / historical.** This plan was written for the Linux
+> desktop-app scenario this fork no longer has: the Wayland compositor,
+> Xwayland, the app launcher and the whole display stack are gone, and the
+> container runs a headless DSH agent (`dsh web`) instead. Nothing shipped
+> consumes audio today, so the plan is kept for reference and is not
+> scheduled. The endpoint/transport ideas below would still apply to a
+> headless in-container program; the "desktop app" framing does not.
+
 ## Goal
 
 Linux desktop apps should be able to play sound, and later record from the
@@ -49,8 +57,8 @@ AudioRecord or AAudio
   -> native PipeWire OR pipewire-pulse clients
 ```
 
-`/usr/share/tawc/` is already the shared namespace for compositor-controlled
-runtime endpoints such as Wayland and Kumquat sockets. Audio endpoints should
+`/usr/share/tawc/` is already the shared namespace for app-owned runtime
+endpoints that the guest needs to reach. Audio endpoints should
 fit the same model: the app owns the real files under its app-private `share/`
 directory, and each install method exposes that directory inside the rootfs at
 `/usr/share/tawc/`.
@@ -99,10 +107,10 @@ normal PulseAudio client libraries and tools, but the server side is PipeWire's
 ALSA and JACK compatibility normally do not add standing daemons. They are
 client-side libraries/config that connect apps to PipeWire.
 
-The Android bridge should initially live in the existing app/compositor process
-as native/Kotlin-managed threads. Splitting it into a separate Android-side
-helper process can be revisited only if isolation or lifecycle pressure makes
-that valuable.
+The Android bridge should initially live in the app process (there is no
+compositor any more) as native/Kotlin-managed threads. Splitting it into a
+separate Android-side helper process can be revisited only if isolation or
+lifecycle pressure makes that valuable.
 
 ## Endpoint Ownership
 
@@ -131,7 +139,7 @@ Open questions for implementation:
   startup order.
 - Backpressure. The Android output clock is authoritative. The bridge needs a
   bounded buffer and clear behavior for underruns/overruns.
-- Cleanup. Remove stale audio endpoints when the compositor/session stops, just
+- Cleanup. Remove stale audio endpoints when the app/session stops, just
   like other app-owned runtime files.
 
 ## PipeWire Configuration Sketch
@@ -229,7 +237,8 @@ contract should not depend on which Android API is used internally.
 2. Compatibility:
    - make Pulse clients use `pipewire-pulse`.
    - make ALSA clients route to PipeWire.
-   - verify Firefox or another real desktop app.
+   - verify a real client against the bridge (no desktop app ships in
+     this fork).
 
 3. Lifecycle:
    - start/stop the audio stack with the tawc session or install runtime.
@@ -296,7 +305,7 @@ Lean away from this. It would require building PipeWire, SPA plugins, and
 modules for Android/Bionic, packaging their config/module paths inside the APK,
 hosting Unix sockets reachable from rootfs processes, and probably still
 running or embedding `pipewire-pulse` and policy logic. It also couples audio
-server crashes/deadlocks directly to the compositor/app process.
+server crashes/deadlocks directly to the app process.
 
 Using `libpipewire` in the app as a client is different and may be useful later,
 but it does not remove the need for the rootfs PipeWire server.

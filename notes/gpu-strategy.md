@@ -1,136 +1,202 @@
-# GPU Driver Strategy and Buffer Sharing
+# GPU Driver Strategy
 
-## Prior Art
+DSH gives the rootfs a GPU for **Vulkan compute** (llama.cpp-class
+workloads), never for drawing to the Android screen. There is no
+compositor, no Wayland/X11 path and no cross-process buffer sharing —
+see TAWC_DSH_DESIGN.md §11 (容器内 GPU 供给层) and §11.5 (display
+stack removal), plus [architecture.md](architecture.md).
 
-### wlroots-android-bridge
-[Xtr126/wlroots-android-bridge](https://github.com/Xtr126/wlroots-android-bridge) --
-wlroots/labwc compositor on Android. Key design decisions we borrow:
-- **One Android Activity per Wayland toplevel** -- Android's window manager handles
-  task switching, recents, window positioning
-- **ASurfaceTransaction for presentation** -- submit rendered buffers to SurfaceFlinger
+The driver has to come from the app: an `untrusted_app` process cannot
+open the DRM node a distro driver needs, and so cannot install one that
+works. See "Why the driver must ship in the app" below.
 
-Why it doesn't work for us: depends on Mesa + minigbm, only works on Intel/x86.
+## Two drivers and a no-driver state
 
-### Termux:X11
-Current state of the art for graphical Linux apps on Android. Works but **all paths
-involve CPU readback** -- no zero-copy GPU buffer sharing. See "Termux:X11 Comparison"
-section below.
+`GraphicsBackend` (`app/src/main/java/me/phie/tawc/Settings.kt`) has
+exactly three members — but only two of them are drivers. The third is
+the *absence* of one, and is named `NONE` rather than `CPU` for that
+reason (see "Why `NONE` is not a CPU backend" below). `RootfsEnv.build`
+turns the chosen one into the spawn environment:
 
-### libhybris
-[libhybris/libhybris](https://github.com/libhybris/libhybris) -- compatibility layer
-allowing glibc programs to load bionic-linked Android shared libraries. Used by Sailfish
-OS and Ubuntu Touch. **Actively maintained** -- Android 16 support merged March 2026.
-This is what enables our architecture.
+| Backend | Driver | In-rootfs env |
+|---|---|---|
+| `LIBHYBRIS` | The device's vendor GPU blob, loaded into the rootfs through our libhybris fork. | `LD_LIBRARY_PATH=/usr/lib/hybris/gl-shims:/usr/lib/hybris`; `HYBRIS_VULKANPLATFORM=null` (headless) |
+| `TURNIP` | Mesa's freedreno Vulkan driver over `/dev/kgsl-3d0`, shipped by the APK. aarch64 only, no WSI. | `LD_LIBRARY_PATH=/usr/lib/turnip`; `VK_ICD_FILENAMES=/usr/lib/turnip/freedreno_icd.json` |
+| `NONE` | Nothing is provisioned and no ICD is pinned, so the container's own loader finds whatever the container itself has. | none — this branch deliberately sets nothing |
 
-### ARM vulkan-wsi-layer
-[ArmSoM/vulkan-wsi-layer](https://github.com/ArmSoM/vulkan-wsi-layer) -- open-source
-Vulkan layer implementing Wayland/X11 WSI independently of the GPU driver. **Not usable
-for our architecture** -- requires `VK_EXT_external_memory_dma_buf` which stock Android
-drivers don't support. Useful as structural reference for writing a Vulkan implicit layer.
+`RootfsEnv` sets no `WAYLAND_DISPLAY`, `DISPLAY`, `SDL_VIDEODRIVER`,
+`GDK_GL` or `HYBRIS_EGLPLATFORM` — nothing in the container renders, so
+there is nothing to point them at. `HYBRIS_VULKANPLATFORM=null` stays:
+libhybris's `libvulkan.so.1` refuses to run until it has `dlopen`'d a
+`vulkanplatform_<name>.so`, and its default (`wayland`) would need glibc
+Wayland in the container.
 
-### libhybris Vulkan WSI
-libhybris has a built-in Vulkan WSI that swaps `VK_KHR_android_surface` for
-`VK_KHR_wayland_surface` and presents via the `android_wlegl` protocol (Sailfish OS
-ecosystem). Uses `WaylandNativeWindow` (inherits `ANativeWindow`) + gralloc for buffer
-allocation. See "libhybris Vulkan" section below.
+### Why `NONE` is not a CPU backend
 
-## The Problem
+It used to be called `CPU` and described as a software fallback, which
+was wrong on three counts:
 
-A Wayland compositor on Android needs GPU buffer sharing between clients (Linux programs
-in a chroot) and the compositor (Android app). On desktop Linux both sides use Mesa and
-dmabufs just work. On Android, the client traditionally uses Mesa Turnip while the
-compositor uses the stock proprietary driver -- two completely different driver stacks
-that can't share buffers.
+- **It ships nothing.** libhybris and Turnip each have an install
+  provider; there is no `NONEInstallProvider`, and nothing to install.
+- **The env it set was for GL, and had no consumer.** It forced
+  `LIBGL_ALWAYS_SOFTWARE=1` + `GALLIUM_DRIVER=llvmpipe`, which only a
+  distro's own Mesa reads. This app installs no Mesa
+  (`DEFAULT_BASE_PACKAGES` plus `RUNTIME_PACKAGES` are `inetutils`, `git`,
+  `less`, `nano`, `openssh`, `python`, `base-devel`, `nodejs`, `npm`), and
+  with no display stack there is nothing for GL to draw to. For Vulkan the
+  branch only *declined to pin an ICD* — its own comment admitted the
+  payoff was conditional ("if `vulkan-swrast` is installed").
+- **For the actual workload it is the wrong shape.** When no GPU driver
+  works, the answer is CPU-native inference — llama.cpp's own CPU backend,
+  which needs no Vulkan ICD at all. Software Vulkan is a detour, and a
+  slower one.
 
-The Termux ecosystem has **never achieved zero-copy GPU buffer sharing** between Mesa
-Turnip and the stock Android driver.
+The user-visible side had already agreed with this: the settings screen
+has always called this state **"Off"** (`vulkan_driver_off`), and
+`VulkanDriver.effective()` maps `NONE → OFF`. Only the code's name and the
+prose around it claimed a third backend.
 
-## Production path: same driver on both sides via libhybris
+**What `NONE` still earns its place for**: not pinning an ICD is what
+keeps the manual diagnostic open. Installing `vulkan-swrast` in a
+container by hand lets the distro loader discover lavapipe — which is how
+the §11 three-way comparison established that Turnip's `q4_K MUL_MAT`
+crash was a driver bug rather than llama.cpp's. That needs the *state*, not
+a bundled backend.
 
-This is the default and release-supported GPU path on physical devices.
-It works on all tested devices.
+`EnabledGraphicsBackends` gates each member on a BuildConfig
+`GRAPHICS_*_ENABLED` field, set from `-PtawcGraphics` in
+`app/build.gradle.kts` (default and release set:
+`libhybris,turnip,none`). `none` is in that list so a build can drop even
+the no-driver state; it is not gating an artifact. The settings picker
+only ever offers shipped backends.
 
-Instead of fighting cross-driver buffer sharing, we eliminate it. Both client and
-compositor use the **stock Android GPU driver**:
+### Default selection
 
-- **Compositor**: Normal Android app. Stock driver natively.
-- **Client**: glibc program in chroot. Uses **libhybris** to load the stock Android GPU
-  driver's bionic `.so` files. Our custom **WSI layer** implements Wayland surface/swapchain
-  support.
+`RootfsEnv.defaultBackend()` derives the spawn backend from
+`Settings.vulkanDriver`, the settings screen's only graphics-related
+pick (`OFF` → `GraphicsBackend.DEFAULT`, `SYSTEM` → `LIBHYBRIS`,
+`TURNIP` → `TURNIP`), falling back to `GraphicsBackend.DEFAULT` when
+that backend isn't shipped.
 
-Same driver = buffer fds are natively compatible. No cross-driver import needed.
+`GraphicsBackend.DEFAULT` is `TURNIP` on aarch64 (physical devices) and
+`NONE` on x86_64 — libhybris cannot load against bionic there and there
+is no kgsl device — falling back to
+`EnabledGraphicsBackends.enabled.first()` when the preferred backend
+isn't in the build.
 
-### Experimental backend: gfxstream bridge
+The broker's per-spawn `GRAPHICS <key>` header on the RUNINSIDE form is
+the only way to pin a backend by hand
+([exec-broker.md](exec-broker.md)).
 
-Forward GL/Vulkan command streams *out* of the chroot to an Android-side service that
-holds the GPU context, instead of loading vendor blobs *into* the chroot. Same logical
-"one driver, two sides" guarantee, achieved by IPC instead of by shared address space.
-Avoids libhybris entirely — works identically on x86 and ARM, AVD and physical, with no
-TLS / linker / CFI patching. Cost is per-call IPC overhead (Vulkan amortizes it; GL is
-more painful). This is implemented as the `gfxstream` backend, but it is not
-production-ready: Vulkan-native WSI renders through AHB on physical hardware today;
-GL/GLES via Zink and real-world AVD validation remain open. See
-[gfxstream-bridge.md](gfxstream-bridge.md).
+## Why the driver must ship in the app
 
-## libhybris
+Android labels the Adreno kernel driver `/dev/kgsl-3d0` as
+`gpu_device` — an `untrusted_app` can open it — while the upstream DRM
+node `/dev/dri/renderD128` is `graphics_device`, which no app-domain
+process can open. Distro Turnip packages build only the `msm` kernel
+backend and so need renderD128; a container that installs one gets a
+driver it cannot use. DSH therefore cross-builds the driver and lays it
+into the rootfs.
 
-[libhybris/libhybris](https://github.com/libhybris/libhybris) -- compatibility layer
-allowing glibc programs to load bionic-linked Android shared libraries. Used by Sailfish
-OS and Ubuntu Touch. **Actively maintained** -- Android 16 support merged March 2026.
+## TURNIP
 
-We use [our fork](https://github.com/wmww/libhybris) with stock Android TLS fixes.
-Local checkout: `./deps/libhybris`. Host-side cross-build (output ships
-in the APK as an asset; each rootfs sees it at `/usr/lib/hybris/` —
-an RO bind under tawcroot, a real-file copy from
-`TawcInstaller`/`LibhybrisInstallProvider` under proot/chroot):
-`scripts/build-libhybris.sh`. Its bionic linker also needs Android's
-generated linker config, copied per spawn to
-`/usr/lib/hybris-config/ld.config.txt` — notes/installation.md "The
-bionic linker config".
+`scripts/build-turnip.sh` cross-builds Mesa's freedreno Vulkan driver
+for aarch64 glibc with `-Dfreedreno-kmds=kgsl -Dvulkan-drivers=freedreno
+-Dplatforms=` (kgsl-only, no WSI) and stages three files:
 
-Loading chain in a client:
-```
-App (glibc-linked)
-  -> dlopen("libEGL.so")  -- finds OUR wrapper (glibc-linked, in LD_LIBRARY_PATH)
-    -> our wrapper calls libhybris
-      -> libhybris loads /vendor/lib64/egl/libEGL_<vendor>.so (bionic-linked)
-      -> libhybris loads /vendor/lib64/egl/libGLESv2_<vendor>.so (bionic-linked)
-```
+- `libvulkan_freedreno.so` — the driver, stripped;
+- `freedreno_icd.json` — the ICD manifest, `library_path` baked to the
+  guest path;
+- `libvulkan.so.1` — the Vulkan loader (lifted from Arch Linux ARM's
+  `vulkan-icd-loader`, so the container need not install one).
 
-### libhybris on Stock (Unpatched) Android (SOLVED 2026-03-31)
+The Mesa pin is `mesa-turnip` @ tag `mesa-26.2.2` in
+[deps.list](../deps/deps.list) — the only Mesa pin left, since the
+gfxstream/Zink Mesa tree went with the compositor. Turnip 25.3.6
+SIGSEGVs on the `q4_K MUL_MAT` shapes llama.cpp emits; 26.2.2 runs the
+`test-backend-ops` MUL_MAT suite clean (TAWC_DSH_DESIGN.md §11.1).
+The build asserts the kgsl-only claim with a `strings | grep renderD128`
+gate.
 
-All prior libhybris deployments required patched Android firmware. We solved this:
+`TawcAssets.ensureTurnipExtracted` extracts the three plain files
+(`assets/turnip/arm64-v8a/`, no tar) into `<filesDir>/turnip/`;
+`TurnipInstallProvider` binds them read-only (tawcroot) or copies them
+(proot/chroot) into each rootfs at `/usr/lib/turnip/`. Turnip is
+aarch64-only, so an x86_64-only build prunes the assets and the TURNIP
+env is never used.
 
-**Problem:** Bionic's `TLS_SLOT_BIONIC_TLS` (slot -1, at `TPIDR_EL0 - 8`) points to a
-~12KB `bionic_tls` struct. The lindroid TLS thunk patcher redirects `TPIDR_EL0` reads
-to `tls_hooks[]`, but slot -1 maps to `tls_hooks[-1]` which is NULL -> SIGSEGV.
+## LIBHYBRIS
+
+[libhybris](https://github.com/libhybris/libhybris) loads bionic-linked
+Android shared libraries into glibc programs. DSH uses
+[our fork](https://github.com/wmww/libhybris) (checkout in
+`deps/libhybris`; patch-by-patch notes in `deps/libhybris/TAWC_FORK.md`)
+with the stock-Android TLS fixes.
+
+`scripts/build-libhybris.sh` cross-builds it and stages
+`build/libhybris-aarch64/install/usr/lib/hybris/`;
+`TawcAssets.ensureLibhybrisExtracted` extracts the
+`assets/libhybris/<abi>.tar` into `<filesDir>/libhybris/`, and
+`LibhybrisInstallProvider` binds it read-only (tawcroot) or copies it
+(proot/chroot) into each rootfs at `/usr/lib/hybris/`.
+
+The backend is headless. `deps/libhybris-shims/` holds the pieces DSH
+builds on top of the fork:
+
+- `vulkanplatform_null.c` — a self-built null Vulkan platform plugin
+  (upstream's pass-through minus the `libwayland-server` / libgralloc /
+  vulkanplatformcommon links), so it loads with libc alone.
+  `build-libhybris.sh` compiles it over the autotools artefact and gates
+  the result (`DT_NEEDED` must not mention wayland/gralloc/libhybris);
+  `RootfsEnv` selects it with `HYBRIS_VULKANPLATFORM=null`. A command
+  that wants to present can prefix
+  `HYBRIS_VULKANPLATFORM=wayland`, but nothing in DSH needs a
+  swapchain.
+- `libgl-shim.c` / `libglesv2-shim.c` / `glx-stubs.c` / `glx-stubs.map` —
+  the GL/GLES shims staged at `/usr/lib/hybris/gl-shims/`, which sit
+  first on `LD_LIBRARY_PATH` so `dlopen("libGL.so.1")` /
+  `dlopen("libGLESv2.so.2")` land on libhybris rather than the distro's
+  glvnd/Mesa.
+
+### libhybris on stock (unpatched) Android (SOLVED 2026-03-31)
+
+All prior libhybris deployments required patched Android firmware. We
+solved this:
+
+**Problem:** Bionic's `TLS_SLOT_BIONIC_TLS` (slot -1, at `TPIDR_EL0 - 8`)
+points to a ~12KB `bionic_tls` struct. The lindroid TLS thunk patcher
+redirects `TPIDR_EL0` reads to `tls_hooks[]`, but slot -1 maps to
+`tls_hooks[-1]` which is NULL -> SIGSEGV.
 
 **Fix (in our libhybris fork's `hooks.c`):**
-1. Changed `tls_hooks[16]` to `struct { void *bionic_tls_ptr; void *slots[16]; } tls_area`
-   so that `slots[-1]` reads `bionic_tls_ptr` (contiguous in memory).
-2. Lazy allocation: `calloc(1, 16384)` on first call per thread, stored in `bionic_tls_ptr`.
-3. Thread wrapping: `_hybris_hook_pthread_create()` wraps `start_routine` to ensure allocation.
+1. Changed `tls_hooks[16]` to
+   `struct { void *bionic_tls_ptr; void *slots[16]; } tls_area` so that
+   `slots[-1]` reads `bionic_tls_ptr` (contiguous in memory).
+2. Lazy allocation: `calloc(1, 16384)` on first call per thread, stored
+   in `bionic_tls_ptr`.
+3. Thread wrapping: `_hybris_hook_pthread_create()` wraps
+   `start_routine` to ensure allocation.
 
-**Result:** EGL 1.5 initializes on Pixel 4a (Adreno 618), Android 16, stock LineageOS.
-TLS patching is always active (no env var needed).
+**Result:** EGL 1.5 initializes on Pixel 4a (Adreno 618), Android 16,
+stock LineageOS. TLS patching is always active (no env var needed).
 
 ### libhybris on Pixel 10 Pro Fold (Tensor G5 + PowerVR) — slot 1 fix (SOLVED 2026-05-11)
 
 Same shape as the slot -1 problem above, on a different slot.
 
-**Problem:** Bionic libc reads `TLS_SLOT_THREAD_ID` (slot 1, at `TPIDR_EL0 + 8`)
-as a `pthread_internal_t*` in every syscall wrapper's errno-set path
-(`__set_errno_internal` does `str w9, [x8, #776]` where 776 is the
-`errno_value` field). Even with the TLS thunk patcher correctly redirecting
-`tpidr_el0` reads to `tls_static_tls`, slot 1 sat zero-initialised, so any
-libc-mediated syscall failure wrote through NULL + 0x308 and SIGSEGV'd.
+**Problem:** Bionic libc reads `TLS_SLOT_THREAD_ID` (slot 1, at
+`TPIDR_EL0 + 8`) as a `pthread_internal_t*` in every syscall wrapper's
+errno-set path (`__set_errno_internal` does `str w9, [x8, #776]` where
+776 is the `errno_value` field). Even with the TLS thunk patcher
+correctly redirecting `tpidr_el0` reads to `tls_static_tls`, slot 1 sat
+zero-initialised, so any libc-mediated syscall failure wrote through
+NULL + 0x308 and SIGSEGV'd.
 
 Hit by Pixel 10 Pro Fold (Tensor G5 + Imagination PowerVR DXT) because
 `mapper.pixel.so` (Pixel's gralloc HAL) goes through bionic libc syscall
-wrappers on every `wl_egl_window`-backed surface creation. Adreno and Mali
-gralloc HALs don't take that path, so this bug went unnoticed on every
-previously-tested device. `weston-simple-egl` was the minimal reproducer;
-lxterminal hit it via GTK's GL renderer too.
+wrappers on every surface creation. Adreno and Mali gralloc HALs don't
+take that path, so this bug went unnoticed on every previously-tested
+device. `weston-simple-egl` was the minimal reproducer.
 
 **Fix (in our libhybris fork's `hooks.c`):** alongside the existing
 bionic_tls allocation in `_hybris_hook___get_tls_hooks`, calloc an 8 KiB
@@ -148,200 +214,64 @@ libc.so** found three other in-use slots:
 If any of those start crashing on a future device, the same fix shape
 (populate the slot in `_hybris_hook___get_tls_hooks`) applies.
 
-**Result:** `weston-simple-egl` and `lxterminal` render correctly on Pixel
-10 Pro Fold, and the existing Pixel 4a / Adreno 618 hybris integration
-tests stay green.
+**Result:** `weston-simple-egl` renders correctly on Pixel 10 Pro Fold,
+and the existing Pixel 4a / Adreno 618 hybris integration tests stay
+green.
 
-### libhybris + libwayland-client Compatibility
+### libhybris + libwayland-client compatibility
 
-TLS patching is always active. When linking libhybris-common.so at compile time
-alongside libwayland-client, the TLS patcher's constructor must run before any bionic
-library is loaded.
+TLS patching is always active. When linking libhybris-common.so at
+compile time alongside libwayland-client, the TLS patcher's constructor
+must run before any bionic library is loaded.
 
-**dlopen approach:** Loading libhybris-common.so via `dlopen()` requires executable stack
-handling. Fixed by `patchelf --clear-execstack` on libhybris-common.so, dlopen instead of
-link-time dependency, and `personality(READ_IMPLIES_EXEC)` before loading.
+**dlopen approach:** Loading libhybris-common.so via `dlopen()` requires
+executable stack handling. Fixed by `patchelf --clear-execstack` on
+libhybris-common.so, dlopen instead of link-time dependency, and
+`personality(READ_IMPLIES_EXEC)` before loading.
 
-## Buffer Sharing via AHardwareBuffer
+### Vulkan dispatch: IFUNC replaced with assembly trampolines (SOLVED)
 
-Android's native cross-process GPU buffer primitive. Stock drivers don't support dmabuf
-extensions (`VK_EXT_external_memory_dma_buf`, `EGL_EXT_image_dma_buf_import`).
+Upstream libhybris's `vulkan.c` uses `VULKAN_IDLOAD()` which creates GNU
+IFUNC symbols for every Vulkan entry point. IFUNC resolvers run during
+the dynamic linker's early relocation phase. Each resolver calls
+`_init_androidvulkan()` -> `android_dlopen("libvulkan.so")`, which loads
+the entire Android runtime (bionic linker, vendor Vulkan driver) while
+the process is still in the ELF startup phase. This crashes when loaded
+alongside complex library trees like GTK4 (which links `libvulkan.so.1`
+at build time via its `vulkan-icd-loader` dependency).
 
-Buffer sharing path (post-libhybris-migration):
-1. Client's libhybris allocates a gralloc buffer via the AHB backend
-   (`AHardwareBuffer_allocate` from libnativewindow.so).
-2. Vendor EGL driver renders into the buffer through libhybris's
-   `wl_egl_window` integration.
-3. Client posts the buffer to the compositor via the standard
-   `android_wlegl` Wayland protocol (`create_handle` + N × `add_fd` +
-   `create_buffer`). Native handle fds + ints travel inside the
-   Wayland connection — no side-channel socket.
-4. Compositor reconstructs the handle and calls
-   `AHardwareBuffer_createFromHandle(REGISTER)` (via the C helper in
-   `compositor/native/wlegl_import.c`) to get an AHB pointer.
-5. Lazy texture import: `eglGetNativeClientBufferANDROID(ahb)` →
-   `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` →
-   `glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES)`. Cached on
-   the wl_buffer's user-data so re-attaches reuse the texture.
-6. Compositor composites and presents.
+**Fix (in our fork):** Replaced `VULKAN_IDLOAD` with arm64 assembly
+trampolines. Each symbol gets a 3-instruction stub (`adrp`+`ldr`+`br
+x16`) that tail-calls through a function pointer. A
+`__attribute__((constructor))` resolves all pointers via a linker-set
+after relocation completes. No IFUNC resolvers, no android_dlopen during
+relocation. See `vulkan.c` and `deps/libhybris/TAWC_FORK.md`.
 
-For this to work on stock Android ≥ 12, our libhybris fork's gralloc
-backend must allocate via `AHardwareBuffer_*` so the handle layout
-matches what `AHardwareBuffer_createFromHandle` expects on the
-compositor side. See `notes/wsi-layer.md` and `libhybris/TAWC_FORK.md`.
+The fork also carries a build fix for `vulkan-headers` 1.4.341+: the Cuda
+NV extension block's guard was `#if VK_HEADER_VERSION >= 269`, but the NV
+Cuda symbols moved behind their extension macro, so it is now
+`#ifdef VK_NV_cuda_kernel_launch`.
 
-### Gralloc Mapper HAL (SOLVED 2026-03-31)
+## Container-side Vulkan (the settings pick)
 
-`AHardwareBuffer_allocate` requires HIDL service management, which checks for
-`hwservicemanager` at `/system_ext/bin/hwservicemanager`. Without `/system_ext`
-bind-mounted in chroot, all passthrough HAL lookups are skipped.
+Programs started *inside* the container don't get `RootfsEnv`'s env, so
+they need a loader and ICD in the standard paths. `VulkanProvisionOp`
+runs the matching script from `app/src/main/assets/vulkan-scripts/`
+inside the rootfs, writing a loader at `/usr/lib/libvulkan.so.1` and —
+for TURNIP — a manifest under `/usr/share/vulkan/icd.d/`, backing up
+whatever the distro shipped so the pick can be undone. This is what
+`Settings.vulkanDriver` (`OFF` / `SYSTEM` / `TURNIP`) records intent
+for; app-spawned processes still get `GraphicsBackend`'s env, which wins
+when the two disagree. See TAWC_DSH_DESIGN.md §11.4.
 
-**Fix:** Add `/system_ext` to chroot bind mounts.
+## Removed with the display stack
 
-**Chroot bind mounts:** `/dev/binderfs` must be bind-mounted separately from `/dev`
-(binderfs is a separate filesystem). Without this, EGL init may work but AHB operations
-fail (need `/dev/binderfs/hwbinder` for HAL access).
-
-## Vulkan External Memory on Android
-
-Stock drivers support `VK_KHR_external_memory_fd` (AVP 2025, ~80% devices) but these
-are **opaque fds**, not dmabufs. `VK_EXT_external_memory_dma_buf` is NOT available.
-
-`VK_ANDROID_external_memory_android_hardware_buffer` (AVP 2022, ~86.5% devices) is
-the most robust path for buffer sharing. Both sides are under our control, so custom
-Wayland protocol (not `zwp_linux_dmabuf_v1`) is fine.
-
-## libhybris Vulkan
-
-libhybris has built-in Vulkan support: loads stock `libvulkan.so` via `android_dlopen()`,
-performs surface extension swap (`VK_KHR_android_surface` <-> `VK_KHR_wayland_surface`)
-in `vulkanplatform_wayland.so`, presents via `android_wlegl`. Used in Sailfish OS.
-
-**Status on tawc (OnePlus 9 / Adreno 660 / Android 16 LineageOS):** ✅ working.
-- `scripts/build-libhybris.sh` builds the `vulkan` subdir and stages
-  `libvulkan.so.1` and `libhybris/vulkanplatform_wayland.so` in the APK asset
-  tree; each rootfs sees them at `/usr/lib/hybris/` (a tawc-owned
-  namespace) via the tawcroot RO bind, or a copy under proot/chroot.
-- `vulkaninfo --summary` works end-to-end: `android_dlopen("libvulkan.so")` succeeds,
-  the Adreno Vulkan driver enumerates as GPU0, `VK_KHR_wayland_surface` is advertised.
-  Covered by `test_vulkaninfo_loads_android_driver`.
-- `vkcube` renders correctly as of 2026-04-20 through the standard direct-render path,
-  no FBO workaround needed.
-
-### What `vkcube` actually needs (2026-04-20)
-
-Two fixes were needed:
-
-1. **`NATIVE_WINDOW_BUFFER_AGE=0`** — landed as a Firefox flicker fix
-   (libhybris commit `59b9a58`, tawc companion commit `12bca6b`).
-   Upstream hardcoded age=2; Adreno's Vulkan WSI used that as a hint to
-   preserve 2-frame-old content and did `LOAD_OP_LOAD` on images still
-   in `VK_IMAGE_LAYOUT_UNDEFINED`, so the frame was effectively
-   discarded.
-2. **Spec-correct undefined `currentExtent` + swapchain resize** —
-   per the Vulkan spec for Wayland, `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`
-   reports `currentExtent = {0xFFFFFFFF, 0xFFFFFFFF}` (undefined), letting the
-   app choose its own size. `maxImageExtent` is raised to 16384x16384.
-   The `wl_egl_window` is created at 1x1; `vkCreateSwapchainKHR` is
-   intercepted (via `vkGetDeviceProcAddr` and `vkGetInstanceProcAddr`)
-   to resize the `WaylandNativeWindow` to match the app's `imageExtent`.
-
-The compositor advertises the logical output size through the normal
-Wayland scale/output protocols and renders logical-sized wlegl/Vulkan
-buffers through `output_scale` to cover the physical display.
-
-### Vulkan dispatch interception (2026-04-20)
-
-The Vulkan dispatch in `vulkan.c` intercepts several calls for the
-Wayland platform (when `WANT_WAYLAND` is defined):
-
-- **`vkGetInstanceProcAddr`** — returns our wrappers for surface
-  creation/destruction, capabilities, swapchain, and device proc addr
-- **`vkGetDeviceProcAddr`** — returns our `vkCreateSwapchainKHR`
-  wrapper. Critical because apps (including vkcube) `dlopen` libvulkan
-  and resolve device-level functions via `vkGetDeviceProcAddr`, not PLT
-- **`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`** — calls through to
-  the Android driver, then patches `currentExtent` to undefined
-  (0xFFFFFFFF) and raises `maxImageExtent` to 16384
-- **`vkCreateSwapchainKHR`** — resizes the `WaylandNativeWindow` to
-  match `imageExtent` before calling the real driver
-
-Also pending in the libhybris working tree: a fence-order fix in the
-Vulkan platform's `queueBuffer` (move `presentBuffer` from before to
-after `sync_wait(fenceFd)`) and a header-skew fix for the Cuda NV
-extension guard. Both are ready to commit; see `libhybris/TAWC_FORK.md`.
-
-**Known libhybris-side header-skew fix we carry:** `vulkan.c`'s Cuda NV extension
-block was guarded on `VK_HEADER_VERSION >= 269`, but in vulkan-headers 1.4.341 the
-NV Cuda symbols are no longer in `vulkan_core.h` (moved behind a beta/compile-time
-flag). We switched the guard to `#ifdef VK_NV_cuda_kernel_launch`, which
-correctly follows the extension's feature-test macro.
-
-### Vulkan IFUNC crash (SOLVED)
-
-Upstream libhybris's `vulkan.c` uses `VULKAN_IDLOAD()` which creates GNU IFUNC
-symbols for every Vulkan entry point. IFUNC resolvers run during the dynamic
-linker's early relocation phase. Each resolver calls `_init_androidvulkan()` →
-`android_dlopen("libvulkan.so")`, which loads the entire Android runtime (bionic
-linker, vendor Vulkan driver) while the process is still in the ELF startup phase.
-This crashes when loaded alongside complex library trees like GTK4 (which links
-`libvulkan.so.1` at build time via its `vulkan-icd-loader` dependency).
-
-**Fix (in our fork):** Replaced `VULKAN_IDLOAD` with arm64 assembly trampolines.
-Each symbol gets a 3-instruction stub (`adrp`+`ldr`+`br x16`) that tail-calls
-through a function pointer. A `__attribute__((constructor))` resolves all pointers
-via a linker-set after relocation completes. No IFUNC resolvers, no android_dlopen
-during relocation. See `vulkan.c` and `libhybris/TAWC_FORK.md`.
-
-Upstream PR #607 takes a different approach (hand-written C wrappers for every
-function); ours is smaller because the macro generates the assembly.
-
-**Upstream PRs worth re-evaluating if we push further on vkcube:**
-- PR #604: Mali `currentExtent` fix, `maxImageExtent` raise, opaque alpha support
-
-## Desktop GL: gl4es evaluated and rejected (2026-07-06)
-
-[ptitSeb/gl4es](https://github.com/ptitSeb/gl4es) (desktop GL → GLES2
-translator) was spike-tested on the OnePlus 9 and **works** over
-libhybris — `glxinfo` under XWayland reports
-`OpenGL 2.1 gl4es wrapper 1.1.7 / GL4ES using Adreno (TM) 660`,
-glxgears runs the full GPU path. Rejected anyway: hard GL 2.1 compat /
-GLSL 1.20 ceiling (no 3.x contexts, textual shader translator), so it
-misses every app we care about (kitty and friends need GL 3.3 core);
-X11/GLX only; single-global-context (not thread-safe). Old-GL-on-X11
-apps alone aren't worth shipping a layer for. The modern-GL gap on
-Vulkan 1.1 devices is instead
-[plans/gl-on-gles-translator.md](../plans/gl-on-gles-translator.md);
-zink remains the endgame on Vulkan 1.3+ hardware.
-
-Durable facts from the spike, useful to any GL-on-GLES front-end:
-
-- libhybris's `x11` EGL ws + TAWC-DRI present works for a GLX-on-EGL
-  translator: plain `eglGetDisplay(x11_display)` with
-  `HYBRIS_EGLPLATFORM=x11`. Do **not** use
-  `eglGetPlatformDisplay(EGL_PLATFORM_ANDROID_KHR, …)` (gl4es's
-  `-DHYBRIS` flag, made for Ubuntu Touch) — it selects the passthrough
-  "null" ws and segfaults in `eglCreateWindowSurface`.
-- Capability probing must use the app's own X display: gl4es probing
-  via `eglGetDisplay(EGL_DEFAULT_DISPLAY)` first made the later real
-  `eglCreateWindowSurface` die (worked around with `LIBGL_NOTEST=1`).
-- Cross-build recipe: `aarch64-linux-gnu-gcc` + host sysroot headers
-  via `-idirafter`, X11 linked from a stub libdir (the sysroot's
-  `libc.so` linker script has absolute host paths).
-- Debugging hazards hit during the spike:
-  [issues/rootfs-crash-exit-code-masked.md](../issues/rootfs-crash-exit-code-masked.md),
-  [issues/broker-stdin-file-redirect-empty.md](../issues/broker-stdin-file-redirect-empty.md),
-  and the since-fixed X11 black-window regression (TAWC-DRI v0.3
-  ConfigureNotify, see [notes/xwayland.md](xwayland.md)).
-
-## Termux:X11 Comparison
-
-Both Termux:X11 paths involve CPU readback:
-
-**Path 1 (`MESA_VK_WSI_DEBUG=sw`):** Client renders with Turnip on GPU -> Mesa WSI reads
-back to CPU -> sent to X server -> uploaded as GL texture. **GPU -> CPU -> GPU.**
-
-**Path 2 (DRI3):** Turnip exports dmabuf -> server does `mmap(fd, PROT_READ)` -> uploaded
-as GL texture. **GPU -> CPU mmap -> GPU.**
-
-Nobody in Termux has achieved true zero-copy GPU buffer sharing.
+The compositor crate and its Kotlin side, the gfxstream bridge (its
+kumquat server only existed as a thread of the compositor process) and
+the libhybris-Zink backend are gone, and with them the whole
+buffer-sharing path: `android_wlegl`, AHardwareBuffer handle import
+(`compositor/native/wlegl_import.c`), the Vulkan WSI layer, the
+Wayland-EGL present path and the Xwayland EGL platform. `deps.list` no
+longer pins smithay, libxkbcommon, gfxstream, rutabaga_gfx, the old
+`deps/mesa` tree or the Xwayland sources. See TAWC_DSH_DESIGN.md
+§11.5.

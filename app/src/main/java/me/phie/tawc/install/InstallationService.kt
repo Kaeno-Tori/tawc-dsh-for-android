@@ -24,7 +24,7 @@ import me.phie.tawc.R
 import me.phie.tawc.install.distro.BootstrapFlavor
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.DistroRegistry
-import me.phie.tawc.launcher.EntryShortcuts
+import me.phie.tawc.install.distro.ImportedPack
 import me.phie.tawc.ops.CancelConfirmation
 import me.phie.tawc.ops.MutableOperation
 import me.phie.tawc.ops.OperationProgress
@@ -73,7 +73,7 @@ import me.phie.tawc.tasks.ProcessScanner
  *     into yet.
  *   - **Cancel uninstall**: the job throws, the outer catch parks
  *     the slot in `FAILED` (since the dir may still exist), and we
- *     stop. The user can re-trigger uninstall from the home screen
+ *     stop. The user can re-trigger uninstall from the main screen
  *     to finish, or pull leftover files manually before doing so.
  *
  * Subprocess descendants spawned via `su` are not always reliably
@@ -205,6 +205,8 @@ class InstallationService : Service() {
                 intent.getStringExtra(EXTRA_EXTERNAL_BINDS),
                 intent.getBooleanExtra(EXTRA_ANDO, false),
                 intent.getStringExtra(EXTRA_BOOTSTRAP),
+                intent.getStringExtra(EXTRA_PACK_URI),
+                intent.getStringExtra(EXTRA_PACK_NAME),
             )
             ACTION_UNINSTALL -> startUninstall(rawId)
             else -> {
@@ -254,6 +256,8 @@ class InstallationService : Service() {
         externalBindsJson: String? = null,
         andoEnabled: Boolean = false,
         bootstrapFlavorId: String? = null,
+        packUri: String? = null,
+        packName: String? = null,
     ) {
         if (!Installation.isValidId(id)) {
             rejectInstall(id, getString(R.string.install_reject_invalid_id))
@@ -364,12 +368,65 @@ class InstallationService : Service() {
         } else {
             bootstrapFlavor = distro.supportedFlavor
         }
+        // An imported pack *is* the bootstrap, so naming a flavor as well
+        // is a contradiction rather than a preference — reject instead of
+        // silently letting one win.
+        if (packUri != null && bootstrapFlavorId != null) {
+            rejectInstall(id, getString(R.string.install_reject_pack_and_flavor, bootstrapFlavorId))
+            return
+        }
+        val importedPack: ImportedPack?
+        if (packUri != null) {
+            if (!packUri.startsWith("content://")) {
+                rejectInstall(id, getString(R.string.install_reject_pack_uri, packUri))
+                return
+            }
+            // The format decides decompression, so it has to come from
+            // somewhere stable. The picker's display name is what we
+            // have; SAF can hand back a name with no extension at all
+            // (a provider-defined one), so refuse rather than guess.
+            val format = ImportedPack.formatFor(packName)
+            if (format == null) {
+                rejectInstall(
+                    id,
+                    getString(
+                        R.string.install_reject_pack_name,
+                        packName ?: "",
+                        BootstrapFormat.entries.joinToString { ".${it.ext}" },
+                    ),
+                )
+                return
+            }
+            // Fail here rather than minutes into a copy if the grant
+            // didn't survive — a stale URI is the common case after a
+            // reboot.
+            val readable = try {
+                applicationContext.contentResolver
+                    .openAssetFileDescriptor(android.net.Uri.parse(packUri), "r")
+                    ?.use { true } ?: false
+            } catch (_: Exception) {
+                false
+            }
+            if (!readable) {
+                rejectInstall(id, getString(R.string.install_reject_pack_unreadable, packName ?: packUri))
+                return
+            }
+            importedPack = ImportedPack(
+                uri = packUri,
+                displayName = packName ?: "pack.${format.ext}",
+                format = format,
+            )
+        } else {
+            importedPack = null
+        }
         // The packages flavor runs its resolve/extract stages as a
         // guest of the tawcroot method machinery; the debug-only
         // proot/chroot methods haven't been taught that trick, so
         // reject the combination up front instead of failing minutes
         // into the install.
-        if (bootstrapFlavor == BootstrapFlavor.PACKAGES && method.key != TawcrootMethod.KEY) {
+        if (importedPack == null &&
+            bootstrapFlavor == BootstrapFlavor.PACKAGES && method.key != TawcrootMethod.KEY
+        ) {
             rejectInstall(
                 id,
                 getString(R.string.install_reject_bootstrap_method, bootstrapFlavor.id, method.key),
@@ -455,6 +512,7 @@ class InstallationService : Service() {
                 applicationContext, store, BootstrapCache(applicationContext),
                 distro, method, id, label, mirrorProxy, externalBinds, andoEnabled,
                 bootstrapFlavor,
+                importedPack,
             )
             try {
                 // runInterruptible maps coroutine cancellation onto a
@@ -534,17 +592,6 @@ class InstallationService : Service() {
             try {
                 runInterruptible(Dispatchers.IO) {
                     installer.uninstall(::publishProgress, ::appendLog)
-                }
-                // Retire the distro's pinned home-screen shortcuts.
-                // Left alone they survive forever (erroring on tap) and
-                // silently alias into a different distro if the id is
-                // ever reused. Best-effort: a shortcut-manager hiccup
-                // must not fail a completed uninstall.
-                runCatching {
-                    EntryShortcuts.disablePinsFor(
-                        applicationContext, id,
-                        getString(R.string.shortcut_distro_uninstalled),
-                    )
                 }
             } catch (t: Throwable) {
                 handleUninstallThrow(store, id, t)
@@ -654,7 +701,7 @@ class InstallationService : Service() {
      * already writes FAILED if the dir survives — and with
      * [RootfsCleaner.wipe]'s two-pass delete the
      * `metadata.json` survives a cancel mid-pass-1, so the slot stays
-     * recognisable on the home screen for a manual recovery.
+     * recognisable on the main screen for a manual recovery.
      *
      * No confirm dialog at the activity layer (a quick double-tap of
      * Cancel might be the user trying to save a chroot they didn't
@@ -941,6 +988,12 @@ class InstallationService : Service() {
          *  distro's supported flavor. Non-supported flavors are
          *  debug-only, enforced in [startInstall]. */
         const val EXTRA_BOOTSTRAP = "bootstrap"
+        /** `content://` URI of a user-supplied rootfs pack. When present
+         *  it *replaces* the distro's bootstrap entirely — see
+         *  [me.phie.tawc.install.distro.ImportedPack]. */
+        const val EXTRA_PACK_URI = "packUri"
+        /** Display name (filename) that accompanies [EXTRA_PACK_URI]. */
+        const val EXTRA_PACK_NAME = "packName"
 
         fun startInstall(
             context: Context,
@@ -952,6 +1005,8 @@ class InstallationService : Service() {
             externalBindsJson: String? = null,
             andoEnabled: Boolean = false,
             bootstrapFlavorId: String? = null,
+            packUri: String? = null,
+            packName: String? = null,
         ) {
             val i = Intent(context, InstallationService::class.java)
                 .setAction(ACTION_INSTALL)
@@ -963,6 +1018,8 @@ class InstallationService : Service() {
             if (externalBindsJson != null) i.putExtra(EXTRA_EXTERNAL_BINDS, externalBindsJson)
             if (andoEnabled) i.putExtra(EXTRA_ANDO, true)
             if (bootstrapFlavorId != null) i.putExtra(EXTRA_BOOTSTRAP, bootstrapFlavorId)
+            if (packUri != null) i.putExtra(EXTRA_PACK_URI, packUri)
+            if (packName != null) i.putExtra(EXTRA_PACK_NAME, packName)
             context.startForegroundService(i)
         }
 

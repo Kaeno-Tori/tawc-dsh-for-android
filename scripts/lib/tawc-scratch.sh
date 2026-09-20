@@ -9,7 +9,7 @@
 #
 # This is for tests and debugging ONLY. Production (the APK at runtime)
 # must never read or write here. Everything production needs ships in
-# the APK and lives under /data/data/me.phie.tawc/ — that way `pm
+# the APK and lives under /data/data/io.github.kaeno_tori.tawc_dsh/ — that way `pm
 # uninstall` removes every trace of the app.
 #
 # Why /data/local/tmp/tawc-dev/ specifically:

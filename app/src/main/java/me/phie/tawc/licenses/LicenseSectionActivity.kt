@@ -10,7 +10,10 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import me.phie.tawc.R
 import me.phie.tawc.ui.buildChildScreen
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcText
 
 /**
  * One license family from [LicensesActivity]: the components it covers,
@@ -95,28 +98,26 @@ class LicenseSectionActivity : AppCompatActivity() {
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
-            val density = resources.displayMetrics.density
-            val gap = (6 * density).toInt()
+            val gap = resources.getDimensionPixelSize(R.dimen.tawc_space_s)
             val view = TextView(parent.context).apply {
                 layoutParams = RecyclerView.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
                 when (viewType) {
                     TYPE_HEADING -> {
-                        textSize = 15f
-                        setTypeface(typeface, Typeface.BOLD)
-                        setPadding(0, (16 * density).toInt(), 0, gap)
+                        tawcText(R.style.TextAppearance_Tawc_BodyStrong)
+                        setPadding(0, resources.getDimensionPixelSize(R.dimen.tawc_space_l), 0, gap)
                     }
                     TYPE_COMPONENTS -> {
-                        textSize = 12f
-                        alpha = 0.75f
+                        tawcText(R.style.TextAppearance_Tawc_Caption)
+                        setTextColor(context.tawcSecondaryColor())
                         setPadding(0, 0, 0, gap * 2)
                     }
                     TYPE_PRE -> {
+                        tawcText(R.style.TextAppearance_Tawc_Caption)
                         setTypeface(Typeface.MONOSPACE)
-                        textSize = 11f
                         setPadding(0, 0, 0, gap)
                     }
                     else -> {
-                        textSize = 13f
+                        tawcText(R.style.TextAppearance_Tawc_BodySmall)
                         setPadding(0, 0, 0, gap)
                     }
                 }

@@ -17,7 +17,7 @@ cd "$ROOT"
 # Classes that must never be compiled into a release build. The whole
 # `me.phie.tawc.dev` package plus the broker actions that live in
 # production packages because they drive production code.
-FORBIDDEN_RE='me[./]phie[./]tawc[./]dev[./]|me[./]phie[./]tawc[./]install[./]InstallActions|me[./]phie[./]tawc[./]launcher[./]LauncherActions|me[./]phie[./]tawc[./]compositor[./]RecordingImeOutput'
+FORBIDDEN_RE='me[./]phie[./]tawc[./]dev[./]|me[./]phie[./]tawc[./]install[./]InstallActions'
 
 fail() { echo "check-no-dev-code: $*" >&2; exit 1; }
 

@@ -6,17 +6,15 @@ import me.phie.tawc.dev.ExecBroker
 import me.phie.tawc.dev.InputActions
 import me.phie.tawc.dev.SettingsActions
 import me.phie.tawc.install.InstallActions
-import me.phie.tawc.launcher.LauncherActions
 
 /**
  * Debug build of the process-start dev hooks, called unconditionally
  * from [TawcApplication.onCreate].
  *
  * The release source set has an empty twin at the same FQCN, which is
- * why the whole `me.phie.tawc.dev` package (plus [InstallActions] and
- * [LauncherActions]) can live in `src/debug/java` and be absent from the
- * release APK entirely — not merely never started. See
- * notes/exec-broker.md.
+ * why the whole `me.phie.tawc.dev` package (plus [InstallActions]) can
+ * live in `src/debug/java` and be absent from the release APK entirely
+ * — not merely never started. See notes/exec-broker.md.
  */
 internal object DevHooks {
     fun start(app: Application) {
@@ -32,6 +30,5 @@ internal object DevHooks {
         InstallActions.registerAll()
         InputActions.registerAll()
         SettingsActions.registerAll()
-        LauncherActions.registerAll()
     }
 }

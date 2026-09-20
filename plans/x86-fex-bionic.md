@@ -43,9 +43,9 @@ here unchanged.
 - The x86_64 RootFS becomes load-bearing for *everything*, including
   package management under emulation (no native fallback shell) — the
   known weak point of FEX-in-proot field reports.
-- Most of the deleted complexity reappears as new complexity: WSI glue
-  (§below), thunk toolchain work, and a containment-layer decision
-  that touches tawcroot's core assumptions.
+- Most of the deleted complexity reappears as new complexity: thunk
+  toolchain work, and a containment-layer decision that touches
+  tawcroot's core assumptions.
 
 ## Central design decision: who contains what
 
@@ -87,7 +87,7 @@ build spike before committing to the plan.
 
 A new install-time choice producing an install whose `metadata` marks
 it emulated. Natural fit: the existing x86_64 `Distro` impls
-(Arch/Void/Debian x86_64 already in `DistroRegistry`) become
+(Arch/Debian x86_64 already in `DistroRegistry`) become
 installable on arm64 hosts when the emulated-arch path is enabled —
 `DistroRegistry.availableForHost()`'s ABI-match filter and
 `Installation.arch` semantics need an explicit emulated-arch concept
@@ -100,25 +100,22 @@ package-manager risk above; the installer is the first stress test.
 New thunk host-lib target: FEX's thunk generator currently emits
 host libs for a Linux glibc sysroot; we need NDK-built bionic host
 libs. Then the actual graphics glue:
-- **WSI is the real work.** Android's EGL/Vulkan present to
-  `ANativeWindow`/AHardwareBuffer, not `wl_surface`. The guest speaks
-  Wayland to our compositor; the thunk host side needs to back guest
-  swapchains/EGLSurfaces with AHBs and hand them to the compositor —
-  most likely mirroring the existing hybris WSI trick (AHB-backed
-  buffers announced over our Wayland protocol) minus the glibc
-  bridging. Needs a real design pass; do not assume it's small — this
-  is the layer that "deleting libhybris" regrows under a new name.
+- **No WSI path exists in this fork.** Android's EGL/Vulkan present to
+  `ANativeWindow`/AHardwareBuffer`, not `wl_surface`, and the
+  compositor that used to accept those buffers is gone. The thunk work
+  here is offscreen/compute only; a guest that needs a real swapchain
+  is out of scope until a display stack returns.
 - GL/GLES coverage questions from the glibc plan apply doubly (NDK
   gives EGL/GLES + Vulkan; desktop-GL guests would need a translator
-  on top — existing gl-on-gles work/plan becomes relevant).
+  on top).
 
 ### 4. Everything-else audit
 
-Sound, input-method, clipboard, launcher/.desktop scanning, terminal
-spawn paths — all currently assume the glibc distro layout and
-tawcroot entry conventions. Under shape (1) most should carry over
-(the x86 RootFS is still a normal distro layout); under shape (2)
-each needs rework. Enumerate during prototyping.
+Sound, input-method, clipboard, terminal spawn paths — all currently
+assume the glibc distro layout and tawcroot entry conventions. Under
+shape (1) most should carry over (the x86 RootFS is still a normal
+distro layout); under shape (2) each needs rework. Enumerate during
+prototyping.
 
 ## Suggested gating milestones
 
@@ -127,7 +124,8 @@ each needs rework. Enumerate during prototyping.
    tawcroot on a device.
 3. Thunk spike: one NDK-built host thunk (Vulkan or EGL/GLES) renders
    offscreen from an x86 guest.
-4. WSI design note written and reviewed before any compositor work.
+4. If a display stack ever returns: a WSI design note written and
+   reviewed before any compositor work.
 
 Abandon criteria are as valuable as milestones here: if (2) needs a
 patch stack rivaling Termux's *and* the glibc-plan path already works
@@ -136,7 +134,7 @@ bar. Reevaluate at each gate.
 
 ## Out of scope
 
-- gfxstream in any form (until proven in prod).
+- gfxstream in any form (the backend was removed in this fork).
 - Replacing the glibc-distro product default — this is an additional
   install-time option, not a migration.
 - Wine/arm64ec integration (separate stack, even though it's the

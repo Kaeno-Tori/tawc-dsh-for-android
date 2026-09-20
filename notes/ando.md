@@ -42,7 +42,7 @@ window size is inherent (same pty), no relay threads.
 guest (under tawcroot)                    app process (untrusted_app, no filter)
 +--------------------+                    +---------------------------------+
 | bash               |   unix socket      | ando broker (Rust thread in the |
-|  └─ ando (client)  | /run/tawc-ando/     | compositor .so; one listener   |
+|  └─ ando (client)  | /run/tawc-ando/     | andobridge .so; one listener   |
 |     header+fds ──── ando.sock ────────→  | per ando-ENABLED distro,       |
 |     0/1/2/cwd via SCM_RIGHTS,            | reconciled by nativeSyncAndo-  |
 |     then: signal msgs →                  | Brokers)                        |
@@ -60,16 +60,14 @@ needs no per-connection distro check beyond the peercred gate.
 The rootfs methods already support everything the client needs: the
 filesystem `sun_path` in `connect(2)` is translated through the share
 bind (tawcroot `syscalls_socket.c::translate_unix_sockaddr`, proot's
-path translation; chroot resolves it natively, same as the wayland and
-kumquat sockets in the same dir), `sendmsg` on a connected socket
-forwards `msg_control` verbatim (SCM_RIGHTS works from the guest), and
-tawcroot doesn't trap `recvmsg` at all.
+path translation; chroot resolves it natively), `sendmsg` on a
+connected socket forwards `msg_control` verbatim (SCM_RIGHTS works
+from the guest), and tawcroot doesn't trap `recvmsg` at all.
 
 ## Components
 
-- **Broker**: `compositor/src/ando.rs`. Standalone `std::thread`s in
-  the app process (not part of the compositor event loop — same shape
-  as the kumquat server thread). There is **one listener per
+- **Broker**: `ando-broker/src/ando.rs`. Standalone `std::thread`s in
+  the app process. There is **one listener per
   ando-enabled install**, each on that install's own filesystem socket
   `<appData>/distros/<id>/ando/ando.sock` (`InstallationStore.andoSocket`;
   a sibling of `rootfs/` — deleted explicitly by `RootfsCleaner`'s
@@ -80,7 +78,7 @@ tawcroot doesn't trap `recvmsg` at all.
     set to exactly the given (id, path) pairs: it starts missing
     listeners (mkdir + unlink stale + bind) and stops removed ones. It
     is idempotent, driven from Kotlin's `AndoBrokers.refresh` (below)
-    via `NativeBridge.nativeSyncAndoBrokers`.
+    via `NativeAndoBridge.nativeSyncAndoBrokers`.
   - **Stopping a listener** (disable) is immediate: close the socket,
     unlink the node, and SIGKILL the pgids of any in-flight children
     spawned through it (each connection registers its child pgid in a
@@ -89,11 +87,38 @@ tawcroot doesn't trap `recvmsg` at all.
     "drains eventually".
   - Per-connection handling, protocol, and the peercred check are
     unchanged. One thread per connection, body in `catch_unwind`; the
-    panic hook in `lib.rs` exempts `ando-*` threads from its abort so a
-    protocol bug kills the connection, not the app. This is the one
-    app-side service in Rust rather than Kotlin: the whole data path is
-    unix-syscall-shaped (peercred, SCM_RIGHTS, setpgid/fchdir, waitid,
-    kill), which Kotlin's LocalSocket handles poorly.
+    panic hook exempts `ando-*` threads from its abort so a protocol bug
+    kills the connection, not the app. This is the one app-side service
+    in Rust rather than Kotlin: the whole data path is unix-syscall-shaped
+    (peercred, SCM_RIGHTS, setpgid/fchdir, waitid, kill), which Kotlin's
+    LocalSocket handles poorly.
+- **Native libraries**: the broker logic is an rlib (`ando-broker/`),
+  linked by one cdylib:
+  - `libandobridge.so` (`andobridge/`) — the JNI surface
+    (`me.phie.tawc.ando.NativeAndoBridge`), DT_NEEDED is just
+    `liblog`/`libdl`/`libc`. This is what `AndoBrokers.refresh` calls.
+
+  It is a library of its own rather than part of some larger native
+  binary because `System.loadLibrary` loads a whole `.so`, so the
+  broker would otherwise pay for whatever else the app links natively
+  at every app start. The ando integration tests
+  (`tests/integration/tests/ando.rs`) drive the app's own startup path,
+  so they exercise the library the Kotlin side actually loads.
+
+  Measured size (arm64-v8a): `libandobridge.so` is 2.03 MB as cargo
+  leaves it and 1.41 MB after `llvm-strip --strip-unneeded`. Note AGP
+  does not shrink it — `stripDebugDebugSymbols` leaves it
+  byte-identical — so the packed size is the cargo `--release` size
+  unless a build applies its own strip step.
+
+  One avoidable cost: **~1.2 MB of `libandobridge.so` is a regex engine**.
+  `android_logger::Config::with_filter` goes through `env_filter`, which
+  pulls `regex`/`regex-automata`/`regex-syntax`, and the filter exists only
+  to keep *dependencies* quiet while allowing our own modules debug —
+  `ando.rs` has no `debug!` calls at all, only `error!`/`info!`/`warn!`.
+  Dropping the filter and keeping just `.with_max_level(...)` measures at
+  0.84 MB (0.54 MB stripped), i.e. 60% smaller. `logging.rs` serves only
+  andobridge now, so that filter is pure overhead.
 - **Lifecycle wiring**: `me.phie.tawc.AndoBrokers.refresh(context)`
   lists installs, filters `InstallationStore.andoEnabled` (metadata OR
   the test override), and calls the native sync; for *disabled*
@@ -338,8 +363,7 @@ processes that already are the app uid.
 
 ando's socket is the only guest→Android exec surface: the debug
 ExecBroker is not guest-reachable (peercred gate `{0, 2000}`; guests
-are 10xxx) and debug-only, and the wayland/kumquat sockets carry no
-exec capability.
+are 10xxx) and debug-only.
 
 Rejected alternatives (folded from the design): removing the CLI when
 disabled (the socket stays reachable — theater); a single socket plus
@@ -394,7 +418,9 @@ to per-distro sockets with more protocol); and a global toggle in
 
 ## See also
 
-- `compositor/src/ando.rs` — broker + sync API (protocol docs in module header).
+- `ando-broker/src/ando.rs` — broker + sync API (protocol docs in module header).
+- `ando-broker/src/logging.rs` — the process-wide logcat + panic-hook setup.
+- `andobridge/src/lib.rs` — JNI surface (`libandobridge.so`).
 - `tawcroot/ando/src/ando.c` — guest client.
 - `tawcroot/ando/build.sh` — static bionic build → jniLibs staging.
 - `app/src/main/java/me/phie/tawc/AndoBrokers.kt` — listener-set reconcile.

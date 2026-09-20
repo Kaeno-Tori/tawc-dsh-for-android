@@ -299,24 +299,24 @@ cmd_start() {
 
     if [ "$ROOTED" = "1" ]; then
         # rootAVD's Magisk doesn't ship magiskpolicy (see notes/emulator.md),
-        # so arch-chroot-run can't install the SELinux type_transition that
-        # lets the compositor (untrusted_app) mmap memfds from chroot
-        # clients. Drop to permissive instead — emulator-only, resets on
-        # reboot. We already gave up isolation by Magisk-rooting the AVD.
+        # so the SELinux type_transition ChrootMounter installs for
+        # chroot-client memfds (`appdomain_tmpfs`) can't be applied. Drop to
+        # permissive instead — emulator-only, resets on reboot. We already
+        # gave up isolation by Magisk-rooting the AVD.
         "$ADB" -s "$serial" shell 'su -c "setenforce 0"' >/dev/null 2>&1 || \
-            echo "WARNING: failed to set SELinux permissive; SHM client surfaces will not render" >&2
+            echo "WARNING: failed to set SELinux permissive" >&2
     else
         echo "==> rootless AVD: skipping setenforce / Magisk-su grants"
     fi
 
     # Suppress the one-shot "swipe down to exit fullscreen" education popup
-    # on fresh AVDs. It otherwise eats the first taps tests send.
+    # on fresh AVDs.
     "$ADB" -s "$serial" shell 'settings put secure immersive_mode_confirmations confirmed' >/dev/null 2>&1 || \
         echo "WARNING: failed to suppress immersive-mode confirmation popup" >&2
 
     # Gboard used to be disabled here because its stylus education dialog
-    # ate stylus-tool-type taps. Keep the IME enabled for text-input work,
-    # but force the stylus path to show the normal keyboard and disable the
+    # swallowed input. Keep the IME enabled (the terminal needs it), but
+    # force the stylus path to show the normal keyboard and disable the
     # stylus toolbar. Re-enable every start so older AVDs recover from the
     # historical disable-user state.
     local gboard_pkg=com.google.android.inputmethod.latin
@@ -341,7 +341,7 @@ cmd_start() {
     # tawc-app-specific runtime setup (no-op if APK isn't installed yet).
     # Grants reset on emulator wipe; setenforce 0 (rooted) resets every boot
     # — re-run `start` after `adb install` to refresh them all.
-    local pkg=me.phie.tawc
+    local pkg=io.github.kaeno_tori.tawc_dsh
     local uid
     uid=$("$ADB" -s "$serial" shell "pm list packages -U $pkg" 2>/dev/null | awk -F: '/uid:/ {print $3}' | tr -d '\r')
     if [ -n "$uid" ]; then

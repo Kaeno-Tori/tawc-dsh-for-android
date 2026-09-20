@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Theme values that differ between day and night and are consumed by
+  `Theme.Tawc` itself.
+
+  These exist so `values-night/styles.xml` does not have to restate the whole
+  theme. A style defined in `values-night` *replaces* the one in `values`
+  rather than merging into it, so before this the night file carried a verbatim
+  copy of all twenty lines of `Theme.Tawc` just to flip two system-bar flags —
+  and any edit to the day copy had to be remembered in the night copy too.
+-->
+<resources>
+    <!-- Dark system-bar icons, for a light surface. -->
+    <bool name="tawc_light_system_bars">true</bool>
+</resources>

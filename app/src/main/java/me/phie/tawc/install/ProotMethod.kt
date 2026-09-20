@@ -27,6 +27,7 @@ import java.io.File
 class ProotMethod(context: Context) : InstallationMethod {
     private val appPaths = AppPaths.from(context)
     private val tawcShare: String = appPaths.shareDir.absolutePath
+
     private val store = InstallationStore(context)
 
     /** Absolute path to the vendored proot binary on disk. */
@@ -115,14 +116,9 @@ class ProotMethod(context: Context) : InstallationMethod {
      *   - `-0`                  — emulate uid 0 for the tracee tree.
      *   - `-b /dev`, `-b /proc`, `-b /sys` — pass kernel-managed
      *     filesystems through; proot doesn't fake these.
-     *   - `-b <appData>/share:/usr/share/tawc` — exposes JUST the
-     *     compositor's `share/` subdir (wayland socket, Xwayland
-     *     xtmp) at /usr/share/tawc inside the rootfs. Deliberately
-     *     not the whole <appData> tree.
-     *   - `-b <appData>/share/xtmp/.X11-unix:/tmp/.X11-unix` —
-     *     surfaces Xwayland's listening socket at the canonical X11
-     *     path. Asymmetric bind (libxcb hardcodes /tmp/.X11-unix for
-     *     `:N` $DISPLAY).
+     *   - `-b <appData>/share:/usr/share/tawc` — exposes JUST the app's
+     *     `share/` subdir at /usr/share/tawc inside the rootfs.
+     *     Deliberately not the whole <appData> tree.
      *   - `--link2symlink`      — turn hardlink calls into symlink
      *     calls. Pacman occasionally hardlinks across mounts; proot
      *     can't always satisfy that on Android.
@@ -142,24 +138,17 @@ class ProotMethod(context: Context) : InstallationMethod {
         LinkerConfig.install(rootfs)
         // Pre-create the bind targets and proot's scratch dir. proot
         // refuses to bind to a guest path that doesn't exist on disk,
-        // so we materialise `<rootfs>/usr/share/tawc` (the wayland
-        // socket bind) and the libhybris bind mounts (see
-        // [LIBHYBRIS_BIND_DIRS]) before invoking it.
+        // so we materialise `<rootfs>/usr/share/tawc` and the libhybris
+        // bind mounts (see [LIBHYBRIS_BIND_DIRS]) before invoking it.
         File(prootTmpDir).mkdirs()
         File(devShmDir).mkdirs()
         File(rootfs, TawcrootMethod.GUEST_TAWC_SHARE_DIR.removePrefix("/")).mkdirs()
         for (dir in LIBHYBRIS_BIND_DIRS) {
             File(rootfs, dir.removePrefix("/")).mkdirs()
         }
-        // Source for the X11-socket fake bind plus the wayland socket
-        // dir. Compositor mkdirs the X11-unix subdir before launching
-        // Xwayland too; recreating here is harmless and lets pre-
-        // compositor entries (install steps, tests) bind it without
-        // relying on launch order. The bare /share dir is also mkdir'd
-        // so proot can satisfy the `-b` source-must-exist check on a
-        // fresh device before the compositor has run.
+        // Bind source for the `-b <share>:/usr/share/tawc` above, so
+        // proot's source-must-exist check passes on a fresh device.
         File(tawcShare).mkdirs()
-        File("$tawcShare/xtmp/.X11-unix").mkdirs()
 
         // Per-distro ando socket dir (notes/ando.md), only when enabled
         // (andoHostDir is null otherwise and also creates the host end,
@@ -184,7 +173,7 @@ class ProotMethod(context: Context) : InstallationMethod {
         // shell-layer quoting — sh -c "<script>" $0 $1 makes $1 = the
         // user command verbatim.
         val invokeArgv =
-            prootArgv(rootfs, andoHostDir) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: Settings.graphicsBackend)
+            prootArgv(rootfs, andoHostDir) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: RootfsEnv.defaultBackend())
         val invokeShell = invokeArgv.joinToString(" ") { Sh.quote(it) }
         val script = if (command != null) {
             "exec /system/bin/setsid $invokeShell /bin/bash -lc \"\$1\""
@@ -271,25 +260,17 @@ class ProotMethod(context: Context) : InstallationMethod {
         for (dir in LIBHYBRIS_BIND_DIRS) {
             addAll(listOf("-b", dir))
         }
-        // Expose JUST the compositor's `share/` subdir at
-        // /usr/share/tawc inside the rootfs — wayland socket and
-        // Xwayland's xtmp dir live there. Deliberately not the whole
-        // <appData> tree (which would expose libhybris's asset
-        // extract, the proot scratch dir, and everything else under
-        // <filesDir> to in-rootfs writes — see notes/installation.md
-        // "/usr/share/tawc"). RootfsEnv sets WAYLAND_DISPLAY to the
-        // in-rootfs path; no /tmp/wayland-0 symlink needed.
+        // Expose JUST the app's `share/` subdir at /usr/share/tawc
+        // inside the rootfs. Deliberately not the whole <appData> tree
+        // (which would expose libhybris's asset extract, the proot
+        // scratch dir, and everything else under <filesDir> to
+        // in-rootfs writes — see notes/installation.md
+        // "/usr/share/tawc").
         addAll(listOf("-b", "$tawcShare:${TawcrootMethod.GUEST_TAWC_SHARE_DIR}"))
         // Per-distro ando socket dir at its own guest path (GUEST_ANDO_DIR,
         // not under the shared /usr/share/tawc bind). Only when ando is
         // enabled; a disabled guest has no such bind.
         andoHostDir?.let { addAll(listOf("-b", "$it:${TawcrootMethod.GUEST_ANDO_DIR}")) }
-        // Surface Xwayland's listening socket at the canonical X11
-        // path. Asymmetric bind, no in-rootfs symlink. Pre-created in
-        // [startInside] so proot accepts the source. libxcb hardcodes
-        // /tmp/.X11-unix/X<N> for the `:N` form of $DISPLAY, so we
-        // can't just expose it via /usr/share/tawc.
-        addAll(listOf("-b", "$tawcShare/xtmp/.X11-unix:/tmp/.X11-unix"))
     }
 
     companion object {

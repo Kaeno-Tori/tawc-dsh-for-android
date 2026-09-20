@@ -2,12 +2,11 @@ package me.phie.tawc.install.distro.debian
 
 import me.phie.tawc.install.BootstrapFormat
 import me.phie.tawc.install.BootstrapVerification
+import me.phie.tawc.install.Http
 import me.phie.tawc.install.MirrorProxy
 import me.phie.tawc.install.distro.TarballBootstrap
 import org.json.JSONObject
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Resolve the debuerreotype `docker-debian-artifacts` rootfs for a
@@ -70,7 +69,7 @@ internal object DebianDockerResolver {
     }
 
     private fun downloadText(url: String, githubApi: Boolean = false): String {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+        val conn = Http.open(url).apply {
             connectTimeout = 15_000
             readTimeout = 30_000
             instanceFollowRedirects = true

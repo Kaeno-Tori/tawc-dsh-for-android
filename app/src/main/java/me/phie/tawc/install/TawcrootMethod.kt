@@ -4,7 +4,6 @@ import android.content.Context
 import me.phie.tawc.AppPaths
 import me.phie.tawc.GraphicsBackend
 import me.phie.tawc.Settings
-import me.phie.tawc.compositor.CompositorService
 import java.io.File
 import java.io.IOException
 
@@ -155,21 +154,15 @@ class TawcrootMethod(context: Context) : InstallationMethod {
     data class PtyExec(val argv: List<String>, val hostEnv: List<String>, val cwd: String)
 
     /**
-     * [command] == null runs an interactive login shell (`-l`); else the
-     * shell runs `-lc <command>` — still a login shell so profile env
-     * fires, matching [startInside].
+     * Runs an interactive login shell (`-l`).
      *
      * Interactive tabs exec root's passwd shell ([RootShell.resolve]),
      * so `chsh` inside the rootfs takes effect; `-l` is accepted by
-     * bash/zsh/fish/dash/ksh alike. Command sessions stay on bash: the
-     * Exec line, the caller's hold-open trailer and the profile
-     * scripts all assume POSIX-or-better shell syntax that fish
-     * doesn't speak.
+     * bash/zsh/fish/dash/ksh alike.
      */
     fun ptyShellExec(
         rootfs: String,
         graphics: GraphicsBackend? = null,
-        command: String? = null,
     ): PtyExec {
         val externalBinds = externalBindsFor(rootfs)
         val assetBinds = assetBinds()
@@ -180,13 +173,8 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             addAll(rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir, shell))
             add("TERM=xterm-256color")
             add("COLORTERM=truecolor")
-            if (command != null) {
-                add(RootShell.DEFAULT)
-                add("-lc"); add(command)
-            } else {
-                add(shell)
-                add("-l")
-            }
+            add(shell)
+            add("-l")
         }
         return PtyExec(argv, listOf("TMPDIR=$tmpdir"), tmpdir)
     }
@@ -202,13 +190,10 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * proot path's habit, since some workflows assume the dst path
      * materializes on disk.
      *
-     * Share dir: source for the X11-socket fake bind plus the wayland
-     * socket dir. Compositor mkdirs the X11-unix subdir before
-     * launching Xwayland too; recreating here is harmless and lets
-     * pre-compositor entries (install steps, tests) bind it without
-     * relying on launch order. The bare /share dir is also mkdir'd so
-     * tawcroot can open it as the bind src on a fresh device before
-     * the compositor has run.
+     * Share dir: the app-owned dir the `/usr/share/tawc` bind sources
+     * from (per-distro ando socket lives elsewhere — see
+     * [GUEST_ANDO_DIR]). mkdir'd here so tawcroot can open it as a bind
+     * src on a fresh device.
      *
      * Linker config: [LinkerConfig] copies Android's generated bionic
      * linker config into the rootfs for libhybris (and clears the
@@ -237,7 +222,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             File(rootfs, bind.guestPath.removePrefix("/")).mkdirs()
         }
         File(tawcShare).mkdirs()
-        File("$tawcShare/xtmp/.X11-unix").mkdirs()
         val tmpdir = "$rootfs/tmp"
         File(tmpdir).mkdirs()
         return tmpdir
@@ -247,7 +231,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * — the shared spawn prefix up to (and including) the rootfs env;
      * callers append the program to run. `SHELL` in that env is root's
      * passwd shell even on the bash-only command paths, so scripts and
-     * desktop-launched terminals see the shell the user chose. */
+     * the in-app terminal see the shell the user chose. */
     private fun rootfsArgv(
         rootfs: String,
         graphics: GraphicsBackend?,
@@ -264,7 +248,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         add("--")
         addAll(RootfsEnv.envArgv(
             RootfsEnv.Method.TAWCROOT,
-            graphics ?: Settings.graphicsBackend,
+            graphics ?: RootfsEnv.defaultBackend(),
             shell,
         ))
     }
@@ -319,7 +303,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
 
     /**
      * RO binds for the whole app-owned asset dirs — `/usr/lib/hybris`,
-     * `/usr/lib/mesa-zink`, `/usr/lib/gfxstream`. Under tawcroot these
+     * `/usr/lib/turnip`. Under tawcroot these
      * replace the per-rootfs copies the matching [TawcInstallProvider]s
      * lay down for proot/chroot: ~30 MB less per install, no copy churn
      * per APK upgrade, and a guest that can no longer corrupt its own
@@ -343,20 +327,15 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      */
     private fun assetBinds(): List<BindSpec> = buildList {
         // No EnabledGraphicsBackends.libhybris gate: LibhybrisInstallProvider
-        // has none either (LIBHYBRIS_ZINK needs this tree too), and the
-        // asset probe already covers a build that ships no libhybris.
-        if (CompositorService.ensureLibhybrisExtracted(appContext)) {
+        // has none either, and the asset probe already covers a build
+        // that ships no libhybris.
+        if (TawcAssets.ensureLibhybrisExtracted(appContext)) {
             add(assetBind("libhybris", LibhybrisInstallProvider.GUEST_LIB_DIR))
         }
-        if (EnabledGraphicsBackends.libhybrisZink &&
-            CompositorService.ensureMesaZinkExtracted(appContext)
+        if (EnabledGraphicsBackends.turnip &&
+            TawcAssets.ensureTurnipExtracted(appContext)
         ) {
-            add(assetBind("mesa-zink", MesaZinkInstallProvider.GUEST_LIB_DIR))
-        }
-        if (EnabledGraphicsBackends.gfxstream &&
-            CompositorService.ensureMesaGfxstreamExtracted(appContext)
-        ) {
-            add(assetBind("mesa-gfxstream", BridgeInstallProvider.GUEST_LIB_DIR))
+            add(assetBind("turnip", TurnipInstallProvider.GUEST_LIB_DIR))
         }
     }
 
@@ -398,13 +377,19 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         externalBinds: List<ExternalBind>,
         andoHostDir: String?,
     ): List<BindSpec> =
-        bindSpecs(tawcShare, LIBHYBRIS_BIND_DIRS, assetBinds, externalBinds, andoHostDir)
+        bindSpecs(
+            tawcShare,
+            LIBHYBRIS_BIND_DIRS,
+            assetBinds,
+            externalBinds,
+            andoHostDir,
+        )
 
     companion object {
         const val KEY = "tawcroot"
         /** In-rootfs path the share dir is exposed at. Single source
-         *  of truth — also referenced by [RootfsEnv] (WAYLAND_DISPLAY)
-         *  and the chroot/proot install methods. */
+         *  of truth — also referenced by the chroot/proot install
+         *  methods. */
         const val GUEST_TAWC_SHARE_DIR = "/usr/share/tawc"
 
         /** In-rootfs dir the per-distro ando socket is exposed at (only
@@ -430,7 +415,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         /** The full bind list, in declared order.
          *
          * Order: /dev → /proc → /sys → libhybris dirs → app asset dirs
-         * → tawc share → ando → X11 → external.
+         * → tawc share → ando → external.
          * No `/dev/shm` bind: tawcroot's SIGSYS handler emulates POSIX
          * shm in-process via memfd_create (`tawcroot/src/shm.c`).
          *
@@ -445,18 +430,12 @@ class TawcrootMethod(context: Context) : InstallationMethod {
          * them: same RO dlopen-source role, and still ahead of the
          * external binds so a user bind can't shadow them.
          *
-         * The tawc share bind exposes JUST `<appData>/share/` (wayland
-         * socket, Xwayland's xtmp dir) at the in-rootfs canonical path
-         * `/usr/share/tawc/`. Deliberately not the whole `<appData>` —
-         * that would expose the libhybris asset extract, the proot
-         * scratch dir, and everything else under `<filesDir>` to
-         * in-rootfs writes. See notes/installation.md "/usr/share/tawc".
-         *
-         * The X11 bind also surfaces Xwayland's listening socket
-         * (`<appData>/share/xtmp/.X11-unix/X<n>`) at the canonical
-         * `/tmp/.X11-unix` path because libxcb hardcodes that path for
-         * the `:N` form of `$DISPLAY`. Asymmetric (src ≠ dst) — tawcroot's
-         * path-rewriting bind handles that natively.
+         * The tawc share bind exposes JUST `<appData>/share/` at the
+         * in-rootfs canonical path `/usr/share/tawc/`. Deliberately not
+         * the whole `<appData>` — that would expose the libhybris asset
+         * extract, the proot scratch dir, and everything else under
+         * `<filesDir>` to in-rootfs writes. See notes/installation.md
+         * "/usr/share/tawc".
          *
          * User-configured external binds (shared storage etc., see
          * [ExternalBind]) ride after every built-in bind so they can't
@@ -484,7 +463,6 @@ class TawcrootMethod(context: Context) : InstallationMethod {
             // no path that falls through into the guest-writable shared
             // dir, or that reaches any ando socket.
             andoHostDir?.let { add(BindSpec(it, GUEST_ANDO_DIR)) }
-            add(BindSpec("$tawcShare/xtmp/.X11-unix", "/tmp/.X11-unix"))
             for (bind in externalBinds) {
                 add(BindSpec(bind.hostPath, bind.guestPath, ro = bind.readOnly))
             }

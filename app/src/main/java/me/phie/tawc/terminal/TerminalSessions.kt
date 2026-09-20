@@ -9,7 +9,7 @@ import com.termux.terminal.TerminalSessionClient
  * Process-wide registry of live terminal sessions: per installation id,
  * an ordered tab list plus the selected index. Sessions outlive
  * [TerminalActivity] — recreation (uncaught config changes, system
- * pressure) and re-opening from the home screen reattach to the running
+ * pressure) and re-opening from the DSH dock reattach to the running
  * shells instead of spawning new ones. (Back merely backgrounds the
  * task, keeping the activity itself alive.) Selection lives here too so
  * recreation restores which tab was showing. Sessions die with the app

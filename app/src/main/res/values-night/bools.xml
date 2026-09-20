@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Night half of the pair documented in values/bools.xml. -->
+<resources>
+    <!-- Light system-bar icons, for a dark surface. -->
+    <bool name="tawc_light_system_bars">false</bool>
+</resources>

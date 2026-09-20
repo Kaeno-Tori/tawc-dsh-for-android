@@ -1,17 +1,20 @@
 #!/bin/bash
-# Regenerate every derived form of the tawc app icon from its one source,
+# Regenerate every derived form of the app icon from its one source,
 # `app/icon.svg` (an Inkscape document — edit it there).
 #
 # Generated outputs, all checked in:
 #
-#   app/src/main/res/drawable/ic_tawc_logo.xml          the mark at full size
+#   app/src/main/res/drawable/ic_tawc_logo.xml            the mark at full size
 #   app/src/main/res/drawable/ic_launcher_foreground.xml  + safe-zone scale
-#   app/src/main/res/values/icon_colors.xml             background colour
-#   fastlane/metadata/android/en-US/images/icon.png     F-Droid store icon
+#   app/src/main/res/values/icon_colors.xml               background colour
 #
 # Run this after every edit to app/icon.svg and commit the results
-# together. Nothing runs it automatically: the app build must not depend on
-# an SVG rasteriser, and these files change about once a year.
+# together. Nothing runs it automatically, and these files change about once
+# a year.
+#
+# A 512×512 raster for a store listing used to be the fourth output. There is
+# no store listing, so it is gone — which also means this no longer needs a
+# rasteriser, only python3.
 #
 # `--check` re-derives everything and reports any output that has drifted,
 # without writing. Use it to confirm the checked-in files still match the
@@ -28,13 +31,11 @@
 # Document Properties > Background), which is why it is a real colour in
 # the document rather than a drawn rectangle.
 #
-# Requires: python3, and one of rsvg-convert / inkscape / magick for the
-# PNG.
+# Requires: python3.
 #
 # Usage:
 #   scripts/gen-icon.sh                # regenerate everything
 #   scripts/gen-icon.sh --check        # verify, write nothing
-#   scripts/gen-icon.sh --size=1024    # store icon at another size
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,21 +43,20 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SOURCE="$ROOT_DIR/app/icon.svg"
 RES_DIR="$ROOT_DIR/app/src/main/res"
-PNG_OUT="$ROOT_DIR/fastlane/metadata/android/en-US/images/icon.png"
-SIZE=512
 CHECK=0
 
 # Fraction of the canvas the mark occupies inside the adaptive icon. The
 # launcher masks the outer edge away, so the foreground has to sit inside
-# the safe zone (72dp of 108dp = 0.667); 0.60 leaves a little margin. The
-# store icon uses the same scale so it matches what launchers draw.
+# the safe zone (72dp of 108dp = 0.667); 0.60 leaves a little margin.
 SAFE_ZONE_SCALE=0.60
 
 for arg in "$@"; do
     case "$arg" in
-        --size=*) SIZE="${arg#--size=}" ;;
         --check) CHECK=1 ;;
-        -h|--help) sed -n '2,36p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        # The leading comment block, whatever its length — a hardcoded
+        # line range here silently truncates the day the header grows.
+        -h|--help) awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next }
+                       NR>1 { exit }' "$0"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -245,29 +245,6 @@ def android_vector(scale=None, note=""):
     return "\n".join(out) + "\n"
 
 
-def store_svg():
-    """Background + safe-zone-scaled mark, for the raster store icon."""
-    out = ['<?xml version="1.0" encoding="UTF-8"?>',
-           '<svg xmlns="http://www.w3.org/2000/svg" width="%s" height="%s" '
-           'viewBox="0 0 %s %s">' % (num(vw), num(vh), num(vw), num(vh)),
-           '  <rect width="%s" height="%s" fill="%s"/>' % (num(vw), num(vh), bg),
-           '  <g transform="translate(%s,%s) scale(%s) translate(%s,%s)">'
-           % (num(vw / 2), num(vh / 2), num(safe_scale),
-              num(-vw / 2), num(-vh / 2))]
-    for stack, p in paths:
-        pre = "".join(
-            '<g transform="translate(%s,%s) rotate(%s) scale(%s,%s)">'
-            % (num(g.get("translateX", 0)), num(g.get("translateY", 0)),
-               num(g.get("rotation", 0)), num(g.get("scaleX", 1)),
-               num(g.get("scaleY", 1))) for g in stack)
-        alpha = ('' if p["alpha"] in (None, "1", "1.0")
-                 else ' fill-opacity="%s"' % p["alpha"])
-        out.append('    %s<path fill="%s"%s d="%s"/>%s'
-                   % (pre, p["fill"], alpha, p["d"], "</g>" * len(stack)))
-    out += ["  </g>", "</svg>"]
-    return "\n".join(out) + "\n"
-
-
 colors = ('<?xml version="1.0" encoding="utf-8"?>\n'
           "<!-- %s -->\n"
           "<resources>\n"
@@ -284,32 +261,12 @@ for name, text in (
     ("ic_tawc_logo.xml", android_vector(note=logo_note)),
     ("ic_launcher_foreground.xml", android_vector(safe_scale, note=fg_note)),
     ("icon_colors.xml", colors),
-    ("store.svg", store_svg()),
 ):
     with open("%s/%s" % (outdir, name), "w") as fh:
         fh.write(text)
 
 print("%d paths, background %s" % (len(paths), bg))
 PY
-
-# ---------------------------------------------------------------------------
-# Raster the store icon. Any of these renderers produces the same image for
-# this artwork (flat fills, no text, no filters); take whichever is present.
-render_png() {
-    local dest="$1"
-    mkdir -p "$(dirname "$dest")"
-    if command -v rsvg-convert >/dev/null; then
-        rsvg-convert -w "$SIZE" -h "$SIZE" -o "$dest" "$work/store.svg"
-    elif command -v inkscape >/dev/null; then
-        inkscape "$work/store.svg" -w "$SIZE" -h "$SIZE" -o "$dest" \
-            >/dev/null 2>&1
-    elif command -v magick >/dev/null; then
-        magick -background none "$work/store.svg" \
-            -resize "${SIZE}x${SIZE}" "$dest"
-    else
-        return 2
-    fi
-}
 
 vector_outputs=(
     "$RES_DIR/drawable/ic_tawc_logo.xml:ic_tawc_logo.xml"
@@ -327,19 +284,6 @@ if [ "$CHECK" = 1 ]; then
             drift=1
         fi
     done
-    # The PNG is deliberately not byte-compared: different rasteriser
-    # versions produce different bytes for identical artwork. Check the
-    # properties that matter and leave the pixels to a re-run.
-    if [ ! -f "$PNG_OUT" ]; then
-        echo "DRIFT: $PNG_OUT missing"
-        drift=1
-    elif command -v identify >/dev/null; then
-        dims="$(identify -format '%wx%h' "$PNG_OUT")"
-        if [ "$dims" != "${SIZE}x${SIZE}" ]; then
-            echo "DRIFT: $PNG_OUT is $dims, expected ${SIZE}x${SIZE}"
-            drift=1
-        fi
-    fi
     [ "$drift" = 0 ] && echo "==> icon outputs match app/icon.svg"
     exit "$drift"
 fi
@@ -349,10 +293,3 @@ for pair in "${vector_outputs[@]}"; do
     cp "$src" "$dest"
     echo "==> wrote $dest"
 done
-
-if render_png "$PNG_OUT"; then
-    echo "==> wrote $PNG_OUT (${SIZE}x${SIZE})"
-else
-    echo "ERROR: need one of rsvg-convert, inkscape, or magick for the PNG" >&2
-    exit 1
-fi

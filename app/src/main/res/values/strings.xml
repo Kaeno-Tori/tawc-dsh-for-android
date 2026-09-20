@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">TAWC</string>
+    <string name="app_name" translatable="false">tawc-dsh</string>
 
     <string name="title_install">Install</string>
     <string name="title_install_distro">Install distro</string>
     <string name="title_distro_info">Distro info</string>
     <string name="title_install_methods">Install methods</string>
-    <string name="title_launcher">Launcher</string>
     <string name="title_operation_log">Operation log</string>
     <string name="title_settings">Settings</string>
     <string name="title_task_manager">Task manager</string>
@@ -16,10 +15,76 @@
     <string name="licenses_covers_heading">Covers %1$d components</string>
     <string name="licenses_variant_heading">Text %1$d of %2$d — covers %3$d components</string>
 
+    <!-- DSH: the agent UI is DSH's own web client rendered in a WebView
+         (see TAWC_DSH_DESIGN.md). These cover the host-side chrome
+         only — the interface itself is served by the harness. -->
+    <string name="title_dsh">DSH</string>
+    <string name="dsh_status_starting">Starting…</string>
+    <string name="dsh_status_loading">Loading interface…</string>
+    <string name="dsh_notification_running">Running</string>
+    <string name="dsh_notification_stopped">Stopped</string>
+    <string name="dsh_action_stop">Stop</string>
+    <string name="dsh_failed_no_distro">No Linux environment is ready yet.</string>
+    <string name="dsh_failed_unknown_method">Install %1$s uses method %2$s, which this build does not support.</string>
+    <string name="dsh_failed_enter">Could not enter the container: %1$s</string>
+    <string name="dsh_failed_exit">The harness exited (exit=%1$d).</string>
+    <string name="dsh_failed_no_harness">This container has no DSH in it (exit=%1$d) — it looks like an install that never finished. Rebuild it, or open a terminal and install DSH there.</string>
+    <string name="dsh_action_restart">Restart</string>
+    <string name="dsh_action_install">Install</string>
+    <string name="dsh_action_reinstall">Reinstall</string>
+    <string name="dsh_action_terminal">Terminal</string>
+    <string name="dsh_action_reload">Reload</string>
+    <!-- The WebView's own failure, as opposed to the harness's: the page
+         never painted, so the overlay would otherwise spin forever. -->
+    <string name="dsh_failed_page">The interface did not load: %1$s</string>
+    <!-- The wordmark DSH's own boot splash shows above its spinner, copied
+         verbatim. Not translatable: it is a product wordmark, and the
+         overlay is a reproduction of that splash (see DshBootOverlay). -->
+    <string name="dsh_boot_wordmark" translatable="false">HARNESS</string>
+    <!-- The floating entry that holds the host-side tools (see
+         FloatingDock). "Tools" rather than a name per entry: it opens
+         the list, it is not one of the entries. -->
+    <string name="dsh_tools">DSH tools</string>
+
+    <!-- Setup flow. The app is single-purpose — hand the user to DSH — so
+         the no-container state is a guided step, not a home screen listing
+         features. Sizes are measured: the Arch Linux ARM bootstrap tarball
+         is 829,367,415 bytes, and a provisioned container plus DSH lands
+         near 1.5 GB. -->
+    <string name="setup_title">Set up DSH</string>
+    <string name="setup_body">DSH runs inside a Linux container, so it needs one before it can start. This is a one-time step; everything after it happens inside DSH.</string>
+    <string name="setup_default_heading">Recommended</string>
+    <string name="setup_default_detail">%1$s &#183; %2$s to download, %3$s once installed</string>
+    <string name="setup_size_download">about 800 MB</string>
+    <string name="setup_size_disk">about 1.5 GB</string>
+    <string name="setup_action_default">Set up</string>
+    <string name="setup_action_custom">Customize install&#8230;</string>
+    <string name="setup_action_import_pack">Import a data pack&#8230;</string>
+
+    <!-- Completion receipt, shown once right after an install finishes.
+         Deliberately reads like a record of what happened, not a welcome:
+         every value here is the one that goes in a bug report. -->
+    <string name="done_title">Container ready</string>
+    <string name="done_subtitle">The container is installed and DSH has everything it needs. This is what you got:</string>
+    <string name="done_row_distro">Distribution</string>
+    <string name="done_row_method">Install method</string>
+    <string name="done_row_source">Source</string>
+    <string name="done_row_location">Location</string>
+    <string name="done_row_when">Installed</string>
+    <string name="done_source_pack">Imported data pack: %1$s</string>
+    <string name="done_open_dsh">Open DSH</string>
+    <string name="setup_failed_title">Setup did not finish</string>
+    <string name="install_interrupted_install">The install was interrupted — the app stopped while it was still running. Nothing can resume it, so start over.</string>
+    <string name="install_interrupted_uninstall">The removal was interrupted — the app stopped while it was still running. Start over to clean up what is left.</string>
+    <string name="setup_action_start_over">Start over</string>
+    <string name="setup_start_over_confirm">This deletes the current container and installs a fresh one.</string>
+    <string name="setup_action_back_to_setup">Back to setup</string>
+    <string name="setup_back_to_setup_confirm">This deletes the unfinished container and returns to setup, where you can pick a different install.</string>
+    <string name="title_container">Container</string>
+
     <string name="action_cancel">Cancel</string>
     <string name="action_delete">Delete</string>
     <string name="action_install">Install</string>
-    <string name="action_install_new_distro">Install new distro</string>
     <string name="action_manage">Manage</string>
     <string name="action_terminal">Terminal</string>
     <string name="action_run">Run</string>
@@ -29,41 +94,82 @@
     <string name="action_collapse">Collapse</string>
     <string name="action_expand">Expand</string>
 
-    <string name="hint_search">Search</string>
-    <string name="hint_search_apps">Search apps</string>
-    <string name="hint_run_command">e.g. firefox</string>
+    <!-- A command that exists in every distro this app installs. It used to
+         suggest `firefox`, from when the app shipped a display stack. -->
+    <string name="hint_run_command">e.g. uname -a</string>
 
-    <string name="home_empty_no_distros">You have no installed Linux distros, install one to get started.</string>
     <string name="install_state_installing">installing&#8230;</string>
     <string name="install_state_uninstalling">uninstalling&#8230;</string>
     <string name="install_state_ready">ready</string>
     <string name="install_state_failed">failed</string>
     <string name="install_state_corrupt">metadata corrupt</string>
 
-    <string name="settings_graphics_driver">Graphics driver</string>
-    <string name="settings_debug_rendering">Debug rendering</string>
-    <string name="settings_compatibility">Compatibility</string>
-    <string name="settings_tint_buffers_by_type">Tint buffers based on type</string>
-    <string name="settings_xwayland">Xwayland</string>
-    <string name="settings_gtk3_broken_menus_workaround">GTK3 broken menus workaround</string>
-    <string name="settings_gtk3_broken_menus_workaround_detail">Spoof a pointer briefly entering each window, allows GTK3 menus to work correctly</string>
-    <string name="settings_display_scale">Display scale: %1$s</string>
     <string name="settings_about">About</string>
     <string name="settings_about_detail">%1$s v%2$s</string>
+    <!-- The shell is a third-party host for the harness: it is not DeepSeek's
+         own Android build, and the ecosystem is crowded enough ("DSH" is the
+         harness's own name, and dsh-* is also what the adb/emulator plugins
+         are called) that saying so is worth a line. -->
+    <string name="settings_about_unofficial">Unofficial community build — not affiliated with, endorsed by, or supported by DeepSeek.</string>
     <string name="settings_about_licenses">Licenses</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="theme_follow_system">Follow system</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+
+    <!-- Page scale for DSH's own interface, which is a desktop-shaped web
+         app: the WebView hands it as many CSS pixels as the screen has dp,
+         so a 16:9 phone runs out of room in both directions. Separate from
+         DSH's own "font size" (that one sizes conversation text only). -->
+    <string name="settings_dsh_display">DSH display</string>
+    <string name="settings_dsh_zoom">Interface scale</string>
+    <string name="settings_dsh_zoom_detail">Scales the DSH interface itself, not just its text. Turn it down on a screen that is narrow or short and the layout gets more room to work with.</string>
+    <string name="settings_dsh_zoom_value">%1$d%%</string>
+    <string name="settings_dsh_zoom_decrease">Smaller</string>
+    <string name="settings_dsh_zoom_increase">Larger</string>
+    <string name="dock_zoom_out">Shrink interface</string>
+    <string name="dock_zoom_in">Enlarge interface</string>
+    <string name="settings_vulkan">Vulkan accelerator</string>
+    <string name="settings_vulkan_detail">Which GPU driver this app uses, and what it writes into the container. Programs started inside the container get the same driver from its standard paths, and this app hands the same one to what it launches.</string>
+    <string name="vulkan_driver_off">Off</string>
+    <string name="vulkan_driver_system">System (vendor driver)</string>
+    <string name="vulkan_driver_turnip">Turnip (Mesa freedreno)</string>
+    <string name="vulkan_confirm_title">Apply to containers?</string>
+    <string name="vulkan_confirm_message_no_container">No installed container is ready yet, so there is nothing to write to. Install one first.</string>
+    <string name="vulkan_confirm_message_cleanup">This removes the Vulkan driver this screen installed from every container and puts back whatever was there before. Continue?</string>
+    <string name="vulkan_confirm_message_enable">This writes the %1$s driver into every installed container. Files under /usr/lib and /usr/share/vulkan are replaced, with the originals kept so this can be undone. Continue?</string>
+    <string name="operation_title_vulkan">Vulkan accelerator: %1$s</string>
+    <string name="vulkan_status_no_container">No ready container to provision</string>
+    <string name="vulkan_status_failed">%1$d of %2$d container(s) failed — see the log above</string>
+    <string name="vulkan_status_scripts_unreadable">Could not read the bundled Vulkan scripts: %1$s</string>
 
     <string name="install_help_methods">What\'s the difference?</string>
     <string name="install_distro_label">Distro</string>
     <string name="install_no_supported_distro">(no distro available for this device)</string>
-    <string name="install_distro_other_show">&#9656; Other distros</string>
-    <string name="install_distro_other_hide">&#9662; Other distros</string>
-    <string name="install_distro_other_note">Less tested and not officially supported</string>
+    <string name="install_mirror_label">Download mirror (optional)</string>
+    <string name="install_mirror_preset_upstream">Upstream (default)</string>
+    <string name="install_mirror_preset_custom">Custom…</string>
+    <string name="mirror_preset_aliyun">Aliyun</string>
+    <string name="mirror_preset_ustc">USTC</string>
+    <string name="mirror_preset_163">NetEase</string>
+    <string name="mirror_preset_sjtu">SJTU</string>
+    <string name="mirror_preset_nju">Nanjing University</string>
+    <string name="mirror_preset_hit">Harbin Institute of Technology</string>
+    <string name="mirror_preset_xjtu">Xi\'an Jiaotong University</string>
+    <string name="mirror_preset_qlu">Qilu University of Technology</string>
+    <string name="mirror_preset_nyist">Nanyang Institute of Technology</string>
+    <string name="install_mirror_hint">https://mirror.example.org/path</string>
+    <string name="install_mirror_default">Leave empty to download from %1$s</string>
+    <string name="install_mirror_applied">Downloading from %1$s</string>
+    <string name="install_mirror_invalid">Enter an http:// or https:// URL</string>
+    <string name="install_mirror_unavailable">%1$s has no mirrorable download, so this is ignored</string>
     <string name="install_label_label">Label</string>
     <string name="install_label_empty">Label cannot be empty</string>
     <string name="install_label_invalid">Label must contain at least one letter or digit</string>
     <string name="install_already_installed_at">Already installed at %1$s</string>
     <string name="install_use_cache_proxy">Use local cache proxy</string>
     <string name="install_external_binds_label">Storage binds: %1$d</string>
+    <string name="install_external_binds_auto_label">Storage binds: %1$d (prefilled from “Bind shared storage automatically” on the home screen)</string>
     <string name="install_changeable_later">Can be changed later:</string>
     <string name="install_binds_grant_title">All files access not granted</string>
     <string name="install_binds_grant_message">A configured bind points at shared storage, which needs the \"All files access\" permission. Without it the distro will refuse to launch until access is granted or the bind is removed.</string>
@@ -72,6 +178,11 @@
 
     <string name="manage_binds_intro">Binds allow Linux programs to access shared Android data.</string>
     <string name="manage_binds_empty">No storage binds configured.</string>
+    <string name="setup_grant_title">All files access</string>
+    <string name="setup_grant_body">Reading your shared storage (Downloads, Pictures, &#8230;) from inside the container needs Android\'s \"All files access\" toggle. Grant it now or skip it &#8212; configuring binds under container management asks again.</string>
+    <string name="setup_grant_granted">Granted.</string>
+    <string name="setup_auto_bind_label">Bind shared storage automatically</string>
+    <string name="setup_auto_bind_description">New containers get the phone\'s storage at /mnt/android and its common folders under /root (Downloads, Documents, Pictures, Music, Videos, DCIM). Changeable later under container management.</string>
     <string name="manage_binds_grant_banner">All files access is not granted. Binds to shared storage will refuse to launch until it is.</string>
     <string name="manage_binds_grant_button">Grant</string>
     <string name="manage_binds_suggested">Suggested binds</string>
@@ -99,9 +210,9 @@
     <string name="install_method_chroot_requires_root">chroot (requires root)</string>
     <string name="install_root_unavailable">root (su) not available &#8212; pick proot or tawcroot, or grant Magisk root.</string>
     <string name="install_method_info_tawcroot_title">tawcroot (recommended)</string>
-    <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator written for TAWC. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the Wayland / GPU paths the compositor needs. Default for new installs and the only officially supported method.</string>
+    <string name="install_method_info_tawcroot_body">Custom systrap-based syscall emulator. Like proot it needs no root, but uses a more efficient ptrace alternative and is built specifically to handle the GPU paths the agent needs. Default for new installs and the only officially supported method.</string>
     <string name="install_method_info_proot_title">proot (dev only)</string>
-    <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most desktop apps work. Slower than tawcroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
+    <string name="install_method_info_proot_body">Userspace chroot via the Termux fork of proot. Rootless and broadly compatible &#8212; pacman, package builds and most command-line software work. Slower than tawcroot because every syscall is intercepted via ptrace. Available in debug builds for comparison; not shipped to release users.</string>
     <string name="install_method_info_chroot_title">chroot (requires root, dev only)</string>
     <string name="install_method_info_chroot_body">Real Linux chroot via su. Fastest path with no syscall translation overhead, but only works on rooted devices (Magisk / Phh-style su). The chroot mounts /apex, /vendor and /system from Android so libhybris GPU drivers can resolve their dependencies. Available in debug builds; not shipped to release users.</string>
 
@@ -134,43 +245,11 @@
     <string name="distro_info_delete_title">Delete %1$s?</string>
     <string name="distro_info_delete_message">This permanently deletes the rootfs at\n%1$s,\nincluding all files in your Linux home directory.</string>
 
-    <string name="launcher_loading_apps">Loading apps&#8230;</string>
-    <string name="launcher_installation_not_found">Installation \'%1$s\' not found.</string>
-    <string name="launcher_installation_state_wait">Installation is %1$s &#8212; wait for it to finish.</string>
-    <string name="launcher_no_launchable_apps">No launchable apps found in this rootfs.\nInstall GUI packages from a shell first.</string>
-    <string name="launcher_no_matches">No matches.</string>
-    <string name="launcher_hidden_count_hint">(%1$d hidden)</string>
-    <string name="launcher_menu_description">Launcher menu</string>
-    <string name="launcher_menu_show_hidden">Show hidden (%1$d)</string>
-    <string name="launcher_action_hide">Hide</string>
-    <string name="launcher_action_unhide">Unhide</string>
-    <string name="launcher_action_edit">Edit</string>
-    <string name="launcher_action_add_home">Add to home screen</string>
-    <string name="shortcut_pin_unsupported">This launcher does not support pinned shortcuts.</string>
-    <string name="shortcut_pin_updated">Updated the existing home-screen shortcut.</string>
-    <string name="shortcut_install_not_ready">Installation is %1$s.</string>
-    <string name="shortcut_entry_gone">This app is no longer installed in the distro.</string>
-    <string name="shortcut_distro_uninstalled">The distro was uninstalled.</string>
-    <string name="launcher_method_unavailable">Install method \'%1$s\' is not included in this build.</string>
-    <string name="launcher_menu_add_entry">Add entry&#8230;</string>
-    <string name="editor_title_new">Add entry</string>
-    <string name="editor_title_edit">Edit program</string>
-    <string name="editor_field_name">Name</string>
-    <string name="editor_field_exec">Command</string>
-    <string name="editor_field_icon">Icon (name or path)</string>
-    <string name="editor_field_terminal">Run in terminal</string>
-    <string name="editor_save">Save</string>
-    <string name="editor_delete">Delete</string>
-    <string name="editor_delete_confirm">Delete \'%1$s\'?</string>
-    <string name="editor_foreign_warning">This file has settings the editor doesn\'t handle. Saving rewrites the file and drops them.</string>
-    <string name="editor_save_failed">Saving failed: %1$s</string>
-    <string name="editor_load_failed">Couldn\'t read the file: %1$s</string>
-    <string name="editor_delete_failed">Delete failed.</string>
-    <string name="launcher_launch_failed_title">Launching %1$s failed</string>
-
     <string name="operation_not_in_flight">No operation in flight for \'%1$s\'.</string>
     <string name="operation_channel_name">Operations</string>
     <string name="operation_channel_description">Long-running install / uninstall / command jobs</string>
+    <string name="operation_result_channel_name">Operation results</string>
+    <string name="operation_result_channel_description">Finished installs, uninstalls and commands</string>
     <string name="operation_starting">Starting&#8230;</string>
     <string name="operation_title_install">Install %1$s</string>
     <string name="operation_title_uninstall">Uninstall %1$s</string>
@@ -204,6 +283,10 @@
     <string name="install_reject_bootstrap_method">bootstrap flavor \'%1$s\' requires the tawcroot method (got \'%2$s\')</string>
     <string name="install_reject_bad_external_binds">invalid externalBinds: %1$s</string>
     <string name="install_reject_external_binds_method">external binds require the tawcroot method (got \'%1$s\')</string>
+    <string name="install_reject_pack_and_flavor">an imported pack replaces the bootstrap — it can\'t be combined with bootstrap flavor \'%1$s\'</string>
+    <string name="install_reject_pack_uri">imported pack must be a content:// document, got \'%1$s\'</string>
+    <string name="install_reject_pack_name">cannot tell the archive format of \'%1$s\' — the name must end in one of %2$s</string>
+    <string name="install_reject_pack_unreadable">cannot read \'%1$s\' — the file may have been moved, or access to it revoked</string>
     <string name="install_cancel_title">Cancel install of \'%1$s\'?</string>
     <string name="install_cancel_message">Cancelling will stop the install and remove the partially extracted rootfs at\n%1$s.\nNothing of yours has been written there yet, so no data will be lost.</string>
     <string name="install_cancel_confirm">Cancel install</string>
@@ -211,6 +294,21 @@
     <string name="install_progress_downloading_arch_bootstrap">Downloading %1$s bootstrap&#8230;</string>
     <string name="install_progress_downloading_bootstrap">Downloading bootstrap: %1$s / %2$s</string>
     <string name="install_progress_verifying_bootstrap">Verifying bootstrap signature&#8230;</string>
+    <string name="install_progress_probing_mirrors">Testing mirrors for this network&#8230;</string>
+    <!-- Checklist labels for the install pipeline. Kept short: they sit in a
+         narrow column, and the running step's full sentence is the status
+         line right below them. -->
+    <string name="install_step_download">Download %1$s bootstrap</string>
+    <string name="install_step_pick_mirror">Pick a mirror</string>
+    <string name="install_step_verify">Verify signature</string>
+    <string name="install_step_read_pack">Read data pack</string>
+    <string name="install_step_extract">Extract rootfs</string>
+    <string name="install_step_configure">Configure container</string>
+    <string name="install_step_keyring">Initialize package manager</string>
+    <string name="install_step_base_packages">Install base packages</string>
+    <string name="install_step_provision">Install Node.js and DSH</string>
+    <string name="install_progress_reading_pack">Reading %1$s&#8230;</string>
+    <string name="install_progress_reading_pack_progress">Reading data pack: %1$s / %2$s</string>
     <string name="install_progress_extracting_rootfs">Extracting rootfs&#8230;</string>
     <string name="install_progress_downloading_index">Downloading package index&#8230;</string>
     <string name="install_progress_verifying_index">Verifying package index signature&#8230;</string>
@@ -222,6 +320,8 @@
     <string name="install_progress_configuring_chroot">Configuring chroot&#8230;</string>
     <string name="install_progress_initializing_package_manager">Initializing package manager&#8230;</string>
     <string name="install_progress_installing_base_packages">Installing base packages&#8230;</string>
+    <string name="install_progress_installing_runtime">Installing Node.js and npm&#8230;</string>
+    <string name="install_progress_installing_dsh">Installing DSH&#8230;</string>
     <string name="install_progress_installed">Installed</string>
     <string name="install_progress_nothing_to_delete">Nothing to delete</string>
     <string name="install_progress_unmounting_chroot">Unmounting chroot&#8230;</string>

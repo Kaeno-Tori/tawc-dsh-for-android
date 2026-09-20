@@ -46,10 +46,12 @@ object RootfsTmpSweeper {
     private const val MAX_AGE_MS = 3L * 24 * 60 * 60 * 1000
 
     /**
-     * Skipped by name at the top level: tawcroot treats it as a bind
-     * key, chroot has a real bind mount there, and the backing
-     * `share/xtmp` dir is shared across spawn surfaces. Not worth
-     * mount detection for one well-known path.
+     * Skipped by name at the top level: it used to be a real bind
+     * mount here (Xwayland's socket dir, removed with the display
+     * layer), and installs upgraded from that build still carry a
+     * live mount until [ChrootMounter.unmount] runs at delete time.
+     * Sweeping through a live bind would delete outside the rootfs;
+     * not worth mount detection for one well-known path.
      */
     private const val X11_DIR = ".X11-unix"
 

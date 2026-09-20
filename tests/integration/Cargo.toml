@@ -8,8 +8,6 @@ autotests = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(tawc_skip_gfxstream_on_target)',
-    'cfg(tawc_skip_libhybris_on_target)',
     'cfg(tawc_skip_root_on_target)',
 ] }
 
@@ -25,15 +23,6 @@ doctest = false
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
-
-# Cold-compositor invariants. Its own binary with `test = false`: plain
-# `cargo test` must not run it, because it only holds before anything has
-# opened a window. `scripts/run-integration-tests.sh` runs it explicitly
-# (`cargo test --test cold_start`) at that point.
-[[test]]
-name = "cold_start"
-path = "tests/cold_start.rs"
-test = false
 
 [[bin]]
 name = "tawc-exec"

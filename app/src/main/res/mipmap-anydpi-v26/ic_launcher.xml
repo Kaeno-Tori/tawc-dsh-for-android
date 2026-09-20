@@ -1,5 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher icon: DSH's own mark (the whale from its web client's
+  `favicon.svg`) on a white tile.
+
+  Both layers are generated from `app/icon.svg` by `scripts/gen-icon.sh`;
+  only the file list lives here, which is why this file is hand-written
+  and the layers are not.
+
+  `<monochrome>` is the same glyph and needs no separate art: it is a
+  single flat path, which is precisely what Android 13's themed icons
+  want. Versions that predate the tag ignore it.
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/tawc_icon_bg" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
 </adaptive-icon>

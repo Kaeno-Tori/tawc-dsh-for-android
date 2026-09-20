@@ -154,7 +154,14 @@ class BootstrapCache(private val dir: File) {
         return deleted
     }
 
-    private fun pathFor(arch: String, format: BootstrapFormat): File =
+    /**
+     * Where `(cacheKey, format)` lives. Public so an import can drop a
+     * user-supplied pack exactly where a download would have put it —
+     * the FIFO path, eviction and the TTL janitor then treat it as an
+     * ordinary cached bootstrap instead of needing a parallel set of
+     * rules for one file.
+     */
+    fun pathFor(arch: String, format: BootstrapFormat): File =
         File(dir, "bootstrap-$arch.${format.ext}")
 
     /**

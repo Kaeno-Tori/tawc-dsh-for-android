@@ -28,9 +28,9 @@ class RootfsCleanerTripwireTest {
     private val allowlist = mapOf(
         // The engine itself.
         "install/RootfsCleaner.kt" to "the one deletion engine",
-        // atomicReplaceDir + staging cleanup for extracted Xwayland
+        // atomicReplaceDir + staging cleanup for the extracted driver
         // assets under <filesDir>; never touches <distros>.
-        "compositor/CompositorService.kt" to "xwayland asset staging",
+        "install/TawcAssets.kt" to "driver asset staging",
         // removeFromRootfs: targeted removal of previously-installed
         // tawc files inside a live rootfs, driven by the recorded
         // tawcInstalls list — not slot deletion.
@@ -49,7 +49,6 @@ class RootfsCleanerTripwireTest {
         // which also reaps a leftover workspace on uninstall.
         "install/pkgbootstrap/PackageBootstrapInstaller.kt" to "bootstrap workspace scratch",
         "install/distro/arch/ArchPacmanCommon.kt" to "in-rootfs pacman cleanup",
-        "install/distro/voidlinux/VoidCommon.kt" to "in-rootfs xbps cleanup",
     )
 
     private val pattern =

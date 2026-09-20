@@ -4,6 +4,7 @@ import me.phie.tawc.install.BootstrapFormat
 import me.phie.tawc.install.BootstrapVerification
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationMethod
+import me.phie.tawc.install.MirrorProbe
 import me.phie.tawc.install.MirrorProxy
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.TarballBootstrap
@@ -45,7 +46,22 @@ internal object ArchLinuxX86_64 : Distro {
         ),
     )
 
+    /**
+     * Arch's own mirror root, so a user mirror supplies the directory
+     * above `iso/`: `https://mirrors.aliyun.com/archlinux` yields
+     * `…/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst`.
+     */
+    override val bootstrapMirrorPrefix: String = "https://geo.mirror.pkgbuild.com/"
+
+    /**
+     * Every Chinese mirror we checked agrees on this one for x86_64 Arch
+     * (unlike ALARM, where the segment varies by mirror).
+     */
+    override val bootstrapMirrorPath: String = "/archlinux"
+
     override val basePackages: List<String> = ArchPacmanCommon.DEFAULT_BASE_PACKAGES
+
+    override val runtimePackages: List<String> = ArchPacmanCommon.RUNTIME_PACKAGES
 
     private const val MIRROR_LIST =
         "Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -66,12 +82,28 @@ internal object ArchLinuxX86_64 : Distro {
     /** See `ArchPacmanCommon.initPackageManager` — kernel package name. */
     private val ARCH_SPECIFIC_CRUFT = listOf("linux")
 
+    /**
+     * Same package tree as the bootstrap, so the bases that serve one
+     * serve the other. The x86 `Server =` tail is `$repo/os/$arch`, so
+     * the probe URL is built from that template rather than from a
+     * hardcoded shape — see [ArchPacmanCommon.packageProbeUrls].
+     */
+    override fun packageProbeUrls(bases: List<String>): List<MirrorProbe.Source> =
+        ArchPacmanCommon.packageProbeUrls(
+            MIRROR_LIST, bootstrapMirrorPrefix, bases, repo = "extra", arch = linuxArch,
+        )
+
     override fun configure(
         method: InstallationMethod,
         rootfs: String,
         mirrorProxy: MirrorProxy?,
         log: (String) -> Unit,
-    ) = ArchPacmanCommon.configure(method, rootfs, MIRROR_LIST, IGNORED_PACKAGES, mirrorProxy, log)
+        mirrorBases: List<String>,
+    ) = ArchPacmanCommon.configure(
+        method, rootfs, MIRROR_LIST, IGNORED_PACKAGES, mirrorProxy, log,
+        mirrorPrefix = bootstrapMirrorPrefix,
+        mirrorBases = mirrorBases,
+    )
 
     override fun initPackageManager(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
         ArchPacmanCommon.initPackageManager(
@@ -82,6 +114,10 @@ internal object ArchLinuxX86_64 : Distro {
             log = log,
         )
 
-    override fun installBasePackages(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
-        ArchPacmanCommon.installBasePackages(method, rootfs, basePackages, log)
+    override fun installPackages(
+        method: InstallationMethod,
+        rootfs: String,
+        packages: List<String>,
+        log: (String) -> Unit,
+    ) = ArchPacmanCommon.installPackages(method, rootfs, packages, log)
 }

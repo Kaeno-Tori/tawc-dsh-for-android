@@ -55,8 +55,8 @@ fi
 
 if [ "$DO_BUILD" -eq 1 ]; then
     # Build + install the APK. We skip the launch — this script does its
-    # own force-stop + am start + readiness wait below, so the
-    # compositor lifetime brackets the cargo run cleanly.
+    # own force-stop + readiness wait below, so the app lifetime brackets
+    # the cargo run cleanly.
     "$ROOT_DIR/scripts/app-build-install.sh" --no-launch
 fi
 
@@ -70,7 +70,7 @@ source "$ROOT_DIR/scripts/lib/tawc-install-id.sh"
 # and exactly one install is present; errors if 0 or >1). The cargo
 # test harness reads the same env var via tawc_integration::install_id.
 INSTALL_ID="$TAWC_INSTALL_ID"
-INSTALL_DIR="/data/data/me.phie.tawc/distros/$INSTALL_ID"
+INSTALL_DIR="/data/data/io.github.kaeno_tori.tawc_dsh/distros/$INSTALL_ID"
 TAWC_DISTROS_DIR="$INSTALL_DIR"
 ROOTFS_DIR="$INSTALL_DIR/rootfs"
 
@@ -89,50 +89,22 @@ read_distro_key() {
     echo "$distro_key"
 }
 
-detect_rootfs_abi() {
-    local host_arch
-    host_arch=$("$TAWC_EXEC" /system/bin/uname -m | tr -d '\r\n')
-    case "$host_arch" in
-        aarch64) echo aarch64 ;;
-        x86_64)  echo x86_64 ;;
-        *) echo "ERROR: unsupported rootfs arch '$host_arch'" >&2; exit 1 ;;
-    esac
-}
-
 set_required_packages() {
     local distro_key="$1"
     case "$distro_key" in
-        arch|manjaro)
-            REQUIRED_PKGS=(
-                gtk4 cairo wayland libx11 libxcb libglvnd
-                gtk3 gtk3-demos gtk4-demos firefox supertuxkart lxterminal
-                mesa-utils weston vulkan-tools
-                xorg-xclock
-                mesa-demos python
-            )
+        arch)
+            # The surviving suites drive the guest through its shell and
+            # the tawcroot test programs (built from this repo and pushed
+            # separately). The only distro package they lean on is
+            # coreutils: linker_config deliberately runs the *interactive*
+            # `ls` shape, which stats every entry of `/`.
+            REQUIRED_PKGS=(coreutils)
             PACKAGE_CHECK_CMD="pacman -Q ${REQUIRED_PKGS[*]} >/dev/null 2>&1"
             INSTALL_CMD="pacman -Syu --noconfirm --needed ${REQUIRED_PKGS[*]}"
             ;;
-        void)
-            REQUIRED_PKGS=(
-                gtk4 cairo wayland libX11 libxcb libglvnd
-                gtk+3 gtk+3-demo gtk4-demo firefox supertuxkart lxterminal
-                glxinfo weston Vulkan-Tools python3
-                xclock
-                mesa-demos mesa-dri
-                dejavu-fonts-ttf
-            )
-            PACKAGE_CHECK_CMD="for p in ${REQUIRED_PKGS[*]}; do xbps-query -p pkgver \"\$p\" >/dev/null 2>&1 || exit 1; done"
-            INSTALL_CMD="xbps-install -Suy && xbps-install -y ${REQUIRED_PKGS[*]}"
-            ;;
         debian-sid)
-            REQUIRED_PKGS=(
-                libgtk-4-1 libcairo2 libwayland-client0 libx11-6 libxcb1 libglvnd0
-                libgtk-3-0 gtk-3-examples gtk-4-examples firefox supertuxkart lxterminal
-                mesa-utils mesa-utils-extra weston vulkan-tools gstreamer1.0-plugins-base
-                x11-apps dbus-x11 python3
-                libgl1-mesa-dri mesa-vulkan-drivers fonts-dejavu-core
-            )
+            # Same reasoning as the arch branch above.
+            REQUIRED_PKGS=(coreutils)
             # `dpkg-query -W <pkg>` exits 0 for a merely *known* name (dpkg
             # status `un`), so a never-installed package passed the check and
             # the test failed later with "command not found". Require the
@@ -141,7 +113,7 @@ set_required_packages() {
             INSTALL_CMD="apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends ${REQUIRED_PKGS[*]}"
             ;;
         *)
-            echo "ERROR: unsupported distro '$distro_key' (expected arch / manjaro / void / debian-sid)" >&2
+            echo "ERROR: unsupported distro '$distro_key' (expected arch / debian-sid)" >&2
             exit 1
             ;;
     esac
@@ -158,103 +130,6 @@ ensure_runtime_packages() {
     echo "=== Installing rootfs test packages: ${REQUIRED_PKGS[*]} ==="
     TAWC_OP_TITLE="install integration test deps ($distro_key)" \
         "$ROOT_DIR/scripts/rootfs-run.sh" "$INSTALL_CMD"
-}
-
-host_file_sha() {
-    sha256sum "$1" | awk '{print $1}'
-}
-
-device_file_sha() {
-    local path="$1"
-    "$TAWC_EXEC" /system/bin/sh -c "test -f $path && sha256sum $path 2>/dev/null | awk '{print \$1}'" \
-        | tr -d '\r' \
-        | head -n1
-}
-
-copy_test_app() {
-    local name="$1"
-    local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
-    local staging="$TAWC_SCRATCH/$name-out"
-    local bin_dir="$ROOTFS_DIR/usr/local/bin"
-    # The repro's bionic-side companion .so files must live under a
-    # guest path starting with /data: the libhybris bionic linker
-    # parses the device's real linker config, and on current firmware
-    # the default namespace is isolated with /data in permitted_paths —
-    # a dlopen from e.g. /usr/local/lib is rejected ("is not accessible
-    # for the namespace"). This is a guest path inside the rootfs, not
-    # device scratch.
-    local lib_dir="$ROOTFS_DIR/data/tawc-tests"
-    local srcs=("$out_dir/$name")
-    local dsts=("$bin_dir/$name")
-
-    if [ "$name" = "libhybris-tls-repro" ]; then
-        srcs+=("$out_dir/tls_lib.so" "$out_dir/weak_lib.so")
-        dsts+=("$lib_dir/tls_lib.so" "$lib_dir/weak_lib.so")
-    fi
-
-    local changed=0
-    local i
-    for i in "${!srcs[@]}"; do
-        [ -f "${srcs[$i]}" ] || { echo "ERROR: missing ${srcs[$i]}" >&2; exit 1; }
-        if [ "$(host_file_sha "${srcs[$i]}")" != "$(device_file_sha "${dsts[$i]}" || true)" ]; then
-            changed=1
-        fi
-    done
-
-    if [ "$changed" = "0" ]; then
-        echo "=== $name already deployed ==="
-        return
-    fi
-
-    echo "=== Deploying $name ==="
-    "$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"
-    adb shell rm -rf "$staging" >/dev/null
-    adb push "$out_dir" "$staging" >/dev/null
-    if [ "$name" = "libhybris-tls-repro" ]; then
-        "$TAWC_EXEC" /system/bin/sh -c "\
-            mkdir -p $bin_dir $lib_dir && \
-            cp $staging/$name $bin_dir/$name && \
-            cp $staging/tls_lib.so $staging/weak_lib.so $lib_dir/ && \
-            chmod a+rx $bin_dir/$name $lib_dir/tls_lib.so $lib_dir/weak_lib.so"
-    else
-        "$TAWC_EXEC" /system/bin/sh -c "\
-            mkdir -p $bin_dir && \
-            cp $staging/$name $bin_dir/$name && \
-            chmod a+rx $bin_dir/$name"
-    fi
-}
-
-build_and_deploy_test_apps() {
-    local distro_key="$1"
-    BUILD_ABI="$(detect_rootfs_abi)"
-    if [ -n "${TAWC_SYSROOT_DISTRO:-}" ]; then
-        BUILD_DISTRO="$TAWC_SYSROOT_DISTRO"
-    else
-        BUILD_DISTRO="$distro_key"
-        case "$BUILD_DISTRO" in
-            debian-sid)
-                # build-host-sysroot.sh has pacman/xbps resolvers today. The
-                # test clients only need a glibc sysroot with the same core
-                # Wayland/X11/GL ABI, so reuse the existing Arch sysroot.
-                BUILD_DISTRO=arch
-                ;;
-        esac
-    fi
-
-    echo "=== Building test apps if needed ($BUILD_DISTRO/$BUILD_ABI) ==="
-    make -C "$ROOT_DIR/tests/apps" -j"$(nproc)" "DISTRO=$BUILD_DISTRO" "ABI=$BUILD_ABI" all
-
-    # shellcheck source=../scripts/lib/tawc-scratch.sh
-    source "$ROOT_DIR/scripts/lib/tawc-scratch.sh"
-    APPS=(wayland-debug-app x11-debug-app eglx11-test)
-    if [ "$BUILD_ABI" = "aarch64" ]; then
-        APPS+=(tawc-dri-test libhybris-tls-repro)
-    else
-        echo "=== Skipping tawc-dri-test, libhybris-tls-repro on $BUILD_ABI (need libhybris, aarch64-only) ==="
-    fi
-    for app in "${APPS[@]}"; do
-        copy_test_app "$app"
-    done
 }
 
 ensure_tawcroot_device_tests() {
@@ -319,40 +194,38 @@ EOF
     DISTRO_KEY="$(read_distro_key)"
     echo "=== Detected distro: $DISTRO_KEY ==="
     ensure_runtime_packages "$DISTRO_KEY"
-    build_and_deploy_test_apps "$DISTRO_KEY"
     ensure_tawcroot_device_tests
 fi
 
-# Launch the compositor once for the whole suite. Tests assert it is
-# running rather than starting it themselves, so the suite gets a single
-# clean compositor lifetime instead of N partial ones. Force-stop first
-# so a previous app process/compositor is gone before the new one starts.
-# MainActivity intentionally does not start the compositor; RUNINSIDE is
-# the shared user/rootfs launch path that starts it lazily.
-echo "=== Starting compositor ==="
-adb shell "am force-stop me.phie.tawc"
+# Bring the debug app up once for the whole suite. Tests talk to it
+# through the exec broker rather than starting it themselves, so the
+# suite gets a single clean app lifetime instead of N partial ones.
+# Force-stop first so a previous app process is gone before the new one
+# starts. MainActivity intentionally does not start the broker; RUNINSIDE
+# is the shared user/rootfs launch path that brings it up lazily.
+echo "=== Starting debug app ==="
+adb shell "am force-stop io.github.kaeno_tori.tawc_dsh"
 sleep 0.3
 "$TAWC_EXEC" --in-rootfs "$INSTALL_ID" -- true >/dev/null
 
-# Wait until the tawc process is alive, the wayland socket exists, AND
-# the compositor event loop answers a broker state query. `am force-stop`
-# leaves the previous run's socket file behind, so the stat alone would
-# falsely match a stale socket while the new compositor is still in early init.
-COMPOSITOR_READY=0
+# Wait until the app process is alive AND its exec broker answers an
+# `app-info` query. A bare pid check also matches a process on its way
+# out, so the broker round-trip is what proves the new instance is
+# actually serving requests.
+APP_READY=0
 for _ in $(seq 1 150); do
-    # Wayland socket lives in the app's private data dir; probe via
-    # the broker (runs as the app uid).
-    if adb shell 'pidof me.phie.tawc >/dev/null' 2>/dev/null && \
-       "$TAWC_EXEC" /system/bin/sh -c "test -e /data/data/me.phie.tawc/share/wayland-0" 2>/dev/null && \
-       "$TAWC_EXEC" --action query-state >/dev/null 2>&1; then
-        COMPOSITOR_READY=1
+    # The broker runs as the app uid, so the probe needs no root and no
+    # separate on-device artifact to stat.
+    if adb shell 'pidof io.github.kaeno_tori.tawc_dsh >/dev/null' 2>/dev/null && \
+       "$TAWC_EXEC" --action app-info >/dev/null 2>&1; then
+        APP_READY=1
         break
     fi
     sleep 0.1
 done
-if [ "$COMPOSITOR_READY" -ne 1 ]; then
-    echo "ERROR: compositor did not become ready within 15s" >&2
-    adb shell am force-stop me.phie.tawc || true
+if [ "$APP_READY" -ne 1 ]; then
+    echo "ERROR: debug app did not become ready within 15s" >&2
+    adb shell am force-stop io.github.kaeno_tori.tawc_dsh || true
     exit 1
 fi
 
@@ -365,13 +238,13 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 PY
 )"
 echo "=== Forwarding exec broker on localhost:$TAWC_EXEC_BROKER_PORT ==="
-adb forward "tcp:$TAWC_EXEC_BROKER_PORT" "localabstract:me.phie.tawc.exec" >/dev/null
+adb forward "tcp:$TAWC_EXEC_BROKER_PORT" "localabstract:io.github.kaeno_tori.tawc_dsh.exec" >/dev/null
 cleanup() {
     local status=$?
     if [ -n "${TAWC_EXEC_BROKER_PORT:-}" ]; then
         adb forward --remove "tcp:$TAWC_EXEC_BROKER_PORT" >/dev/null 2>&1 || true
     fi
-    adb shell am force-stop me.phie.tawc >/dev/null 2>&1 || true
+    adb shell am force-stop io.github.kaeno_tori.tawc_dsh >/dev/null 2>&1 || true
     exit "$status"
 }
 trap cleanup EXIT
@@ -385,16 +258,6 @@ else
     echo "=== Running integration tests ==="
 fi
 EXTRA_RUSTFLAGS=()
-if [ "$DEVICE_IS_EMULATOR" -eq 1 ]; then
-    echo "=== Marking gfxstream:: tests ignored on emulator ==="
-    EXTRA_RUSTFLAGS+=(--cfg tawc_skip_gfxstream_on_target)
-fi
-case "$DEVICE_ABI" in
-    x86*|i386|i686)
-        echo "=== Marking libhybris-backed tests ignored on x86 device ($DEVICE_ABI) ==="
-        EXTRA_RUSTFLAGS+=(--cfg tawc_skip_libhybris_on_target)
-        ;;
-esac
 # Root-requiring tests need Magisk-flavor `su -c` (the app's Su.kt is
 # Magisk-only, and AOSP /system/xbin/su rejects -c). The rootless AVD's
 # userdebug su only takes `su [WHO [CMD...]]`, so probe the exact form
@@ -408,24 +271,15 @@ if [ "${#EXTRA_RUSTFLAGS[@]}" -gt 0 ]; then
 fi
 cd "$ROOT_DIR/tests/integration"
 
-# Cold-start tests first: the compositor has been up since the readiness
-# wait above and no Activity surface has ever registered, which is the
-# only point in the run where that state provably holds. Its own binary
-# (`test = false`), so the main run below never re-runs it warm.
+# A single test binary (`tests/integration.rs`); per-group submodules are
+# selected through the libtest filter above. Root-requiring tests are
+# marked ignored via RUSTFLAGS when the target has no Magisk-style su.
 set +e
-cargo test --test cold_start -- "${LIBTEST_ARGS[@]}"
-COLD_EXIT=$?
 cargo test -- "${LIBTEST_ARGS[@]}"
 TEST_EXIT=$?
 set -euo pipefail
-if [ "$COLD_EXIT" -ne 0 ]; then
-    echo "=== Cold-start tests FAILED (see above, before the main run) ==="
-    if [ "$TEST_EXIT" -eq 0 ]; then
-        TEST_EXIT=$COLD_EXIT
-    fi
-fi
 
-echo "=== Stopping compositor ==="
-adb shell am force-stop me.phie.tawc
+echo "=== Stopping debug app ==="
+adb shell am force-stop io.github.kaeno_tori.tawc_dsh
 
 exit $TEST_EXIT

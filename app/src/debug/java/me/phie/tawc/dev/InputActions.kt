@@ -1,133 +1,38 @@
 package me.phie.tawc.dev
 
-import android.content.Intent
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
-import android.view.KeyEvent
-import android.view.inputmethod.CompletionInfo
-import android.view.inputmethod.CorrectionInfo
-import androidx.core.net.toUri
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import me.phie.tawc.AndoBrokers
 import me.phie.tawc.Settings
-import me.phie.tawc.compositor.ClipboardBridge
-import me.phie.tawc.compositor.CompositorActivity
-import me.phie.tawc.compositor.NativeBridge
-import me.phie.tawc.compositor.RecordingImeOutput
-import me.phie.tawc.compositor.TawcInputConnection
 import me.phie.tawc.install.ChrootMethod
 import me.phie.tawc.install.InstallationStore
 import me.phie.tawc.ops.LogScreenActivity
 import me.phie.tawc.tasks.ProcessScanner
 
 /**
- * Broker actions that drive compositor input from host tests, registered
- * from [me.phie.tawc.TawcApplication.onCreate] (debug builds only).
+ * Broker actions that don't belong to a more specific handler: test
+ * scaffolding plus one static app fact the host can't cheaply learn over
+ * adb. Registered from [me.phie.tawc.TawcApplication.onCreate] (debug
+ * builds only).
  *
- * # Rule: tests drive input through Android's public input entry points
+ * This file used to hold the compositor input / IME / clipboard drivers
+ * (`ic-*`, `hardware-key`, `back`, `inject-touch`, `inject-pointer`,
+ * `query-state`, the `focused-*` probes, `clipboard-*`). They went away
+ * with the display stack (TAWC_DSH_DESIGN.md §11): there is no
+ * compositor to drive, no client window to focus, and no IME bridge to
+ * talk to.
  *
- * Soft-IME actions call methods on the active
- * [me.phie.tawc.compositor.TawcInputConnection] — the same Kotlin surface
- * the system IMM dispatches Gboard / OpenBoard / AOSP-latin events through.
- * Hardware-key actions dispatch [KeyEvent]s through the focused Activity/view
- * path Android uses for USB/Bluetooth keyboards.
- * There is intentionally **no broker action that calls `NativeBridge.native*`
- * directly**. The test path = the production path, and the wayland client
- * (wayland-debug-app) is the other endpoint. Tests assert Android contract
- * results and what the client sees on the wire, not tawc private state.
- *
- * Why this matters: an earlier version of this file exposed bypass
- * actions (`inject-text`, `set-composing`, `key-event`, …) that called
- * native trampolines directly. They were originally added because the
- * system IME amplified test broadcasts in non-deterministic ways. Once
- * [test-init] swaps [NativeBridge.imeOutput] to a [RecordingImeOutput],
- * the IME is no longer in the loop, and the
- * justification disappears — the bypass became dead weight that hid
- * input regressions behind a wayland-side fallback (text-input-v3 done
- * ordering can produce the right *observable* even when the Android
- * entrypoint did not translate the IME request correctly). Driving
- * input through IC or focused-view dispatch closes that hole.
- *
- * Anything that needs to read compositor state without driving input
- * (e.g. [query-state] for `clients` / `toplevels` counts) is allowed —
- * those are observational. Anything that *changes* compositor input
- * state must come in through Android's public input surface.
- *
- * # Action surface
- *
- * IC drivers (mirror Gboard's [android.view.inputmethod.InputConnection]
- * surface):
- *
- * | Action | Args | Calls |
- * |--------|------|-------|
- * | `ic-commit-text` | `text` | `IC.commitText(text, 1)` |
- * | `ic-commit-completion` | `text` | `IC.commitCompletion(CompletionInfo(..., text))` |
- * | `ic-commit-correction` | `offset`, `old`, `new` | `IC.commitCorrection(CorrectionInfo(...))` |
- * | `ic-replace-text` | `start`, `end`, `text` | `IC.replaceText(start, end, text, 1, null)` |
- * | `ic-set-composing-text` | `text` | `IC.setComposingText(text, 1)` |
- * | `ic-set-composing-region` | `start`, `end` | `IC.setComposingRegion(start, end)` |
- * | `ic-finish-composing` | — | `IC.finishComposingText()` |
- * | `ic-set-selection` | `start`, `end` | `IC.setSelection(start, end)` (no-op only) |
- * | `ic-delete-surrounding-text` | `before`, `after` | `IC.deleteSurroundingText(before, after)` |
- * | `ic-delete-surrounding-text-codepoints` | `before`, `after` | `IC.deleteSurroundingTextInCodePoints(before, after)` |
- * | `ic-send-key-event` | `keycode` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))` |
- * | `ic-send-modified-key-event` | `keycode`, `ctrl`, `alt`, `shift` | `IC.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))` |
- * | `ic-finish-hidden-composing` | — | `RecordingImeOutput` stale hidden IC `finishComposingText()` |
- * | `hardware-key` | `keycode`, `action=down|up|press`, `repeat` | focused Activity/view `dispatchKeyEvent(KeyEvent(...))` |
- * | `back` | — | focused Activity back-press path (same entry as the system OnBackInvoked callback) |
- * | `inject-touch` | `kind=tap|tap-logical|tap-outside-popup|drag|multitouch` | Dispatch MotionEvents to the focused SurfaceView |
- * | `inject-pointer` | `kind=move|button|scroll|hscroll|hover-exit`, `x`, `y`, `button`, `amount` | Dispatch SOURCE_MOUSE MotionEvents to the focused SurfaceView |
- *
- * Test-mode helpers:
- *
- * | Action | Calls |
- * |--------|-------|
- * | `input-ready` | succeeds only when the focused Activity has an active IC |
- * | `focused-editor-info` | returns the last test-created EditorInfo input fields |
- * | `ime-selection-updates` | dumps recorded `updateSelection` calls (what the editor told the IME) |
- * | `focused-activity-id` | returns the currently focused compositor Activity id |
- * | `focus-activity` | brings an existing compositor Activity document task forward |
- * | `test-init` | enter in-memory test settings, enable test input, close current client windows and lingering op log screens |
- *
- * Observational:
- *
- * | Action | Calls |
- * |--------|-------|
- * | `query-state` | `NativeBridge.nativeQueryState()` (no main-loop hop, no focused activity required) |
- * | `app-info` | prints `nativeLibraryDir=<path>` (host-side tawcroot prod-env tests exec `libtawcroot.so` from there) |
+ * | Action | Args | Effect |
+ * |--------|------|--------|
+ * | `app-info` | — | prints `nativeLibraryDir=<path>`; the host-side tawcroot prod-env tests exec `libtawcroot.so` from there |
+ * | `cleanup-rootfs` | `installId` | SIGKILL every process rooted in that install's rootfs |
+ * | `test-init` | optional `installId` | enter in-memory test settings, close lingering op-log screens, drop ando overrides, optionally clean the rootfs |
  */
 internal object InputActions {
     fun registerAll() {
-        ActionRegistry.register("ic-commit-text", IcCommitTextAction)
-        ActionRegistry.register("ic-commit-completion", IcCommitCompletionAction)
-        ActionRegistry.register("ic-commit-correction", IcCommitCorrectionAction)
-        ActionRegistry.register("ic-replace-text", IcReplaceTextAction)
-        ActionRegistry.register("ic-set-composing-text", IcSetComposingTextAction)
-        ActionRegistry.register("ic-set-composing-region", IcSetComposingRegionAction)
-        ActionRegistry.register("ic-finish-composing", IcFinishComposingAction)
-        ActionRegistry.register("ic-set-selection", IcSetSelectionAction)
-        ActionRegistry.register("ic-delete-surrounding-text", IcDeleteSurroundingTextAction)
-        ActionRegistry.register("ic-delete-surrounding-text-codepoints", IcDeleteSurroundingTextInCodePointsAction)
-        ActionRegistry.register("ic-send-key-event", IcSendKeyEventAction)
-        ActionRegistry.register("ic-send-modified-key-event", IcSendModifiedKeyEventAction)
-        ActionRegistry.register("ic-finish-hidden-composing", IcFinishHiddenComposingAction)
-        ActionRegistry.register("hardware-key", HardwareKeyAction)
-        ActionRegistry.register("back", BackAction)
-        ActionRegistry.register("inject-touch", InjectTouchAction)
-        ActionRegistry.register("inject-pointer", InjectPointerAction)
-
-        ActionRegistry.register("query-state", QueryStateAction)
         ActionRegistry.register("app-info", AppInfoAction)
-        ActionRegistry.register("input-ready", InputReadyAction)
-        ActionRegistry.register("focused-editor-info", FocusedEditorInfoAction)
-        ActionRegistry.register("ime-selection-updates", ImeSelectionUpdatesAction)
-        ActionRegistry.register("focused-activity-id", FocusedActivityIdAction)
-        ActionRegistry.register("focus-activity", FocusActivityAction)
-        ActionRegistry.register("clipboard-set-text", ClipboardSetTextAction)
-        ActionRegistry.register("clipboard-get-text", ClipboardGetTextAction)
-        ActionRegistry.register("clipboard-debug-state", ClipboardDebugStateAction)
         ActionRegistry.register("cleanup-rootfs", CleanupRootfsAction)
         ActionRegistry.register("test-init", TestInitAction)
     }
@@ -156,352 +61,6 @@ internal object InputActions {
     }
 
     /**
-     * Resolve the currently-focused [me.phie.tawc.compositor.CompositorActivity]
-     * via [NativeBridge.serviceRefForDev] and pass it to [block]. Returns
-     * 0 on success, 1 with an error line on the host's stderr if no
-     * focused activity exists. The error is loud by design — silent skip
-     * masks test setup mistakes (no app launched, or app crashed before
-     * the action fired). Setting up a focused activity is the test's
-     * responsibility.
-     */
-    private fun withFocusedActivity(ctx: ActionContext, block: (me.phie.tawc.compositor.CompositorActivity) -> Unit): Int {
-        val service = NativeBridge.serviceRefForDev() ?: run {
-            ctx.err("no CompositorService running (cold start the app first)")
-            return 1
-        }
-        var ok = false
-        val ran = onMainBlocking {
-            val activity = service.focusedActivity()
-            if (activity == null) {
-                // Host-side retry loops (adb::back, inject_touch) match on
-                // the "no focused CompositorActivity" prefix; keep it stable.
-                ctx.err("no focused CompositorActivity (no client window has focus)")
-            } else {
-                block(activity)
-                ok = true
-            }
-        }
-        if (!ran) {
-            ctx.err("main loop did not run action within 5s")
-            return 1
-        }
-        return if (ok) 0 else 1
-    }
-
-    private fun clearRecordingImeOutput() {
-        (NativeBridge.imeOutput as? RecordingImeOutput)?.clearTestInputConnection()
-    }
-
-    private fun withActiveInputConnection(
-        ctx: ActionContext,
-        action: String,
-        block: (TawcInputConnection) -> Boolean,
-    ): Int {
-        var missing = false
-        var rejected = false
-        val status = withFocusedActivity(ctx) {
-            val ic = it.focusedInputConnectionForDev()
-            if (ic == null) {
-                ctx.err("no active TawcInputConnection for focused activity")
-                missing = true
-            } else {
-                rejected = !block(ic)
-                if (rejected) {
-                    ctx.err("$action returned false")
-                }
-            }
-        }
-        if (status != 0) return status
-        return if (missing || rejected) 1 else 0
-    }
-
-    private fun argInt(args: Map<String, String>, key: String, default: Int? = null): Int? {
-        val raw = args[key] ?: return default
-        return raw.toIntOrNull() ?: error("'$key' must be an integer (got '$raw')")
-    }
-
-    private fun argBool(args: Map<String, String>, key: String): Boolean =
-        when (args[key]?.lowercase()) {
-            null, "", "0", "false", "no" -> false
-            "1", "true", "yes" -> true
-            else -> error("'$key' must be a boolean")
-        }
-
-    // -- IC drivers ---------------------------------------------------------
-
-    private object IcCommitTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val text = args["text"] ?: return ctx.fail("ic-commit-text: --arg text=... required")
-            return withActiveInputConnection(ctx, "ic-commit-text") { ic ->
-                ic.commitText(text, 1)
-            }
-        }
-    }
-
-    private object IcCommitCompletionAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val text = args["text"] ?: return ctx.fail("ic-commit-completion: --arg text=... required")
-            return withActiveInputConnection(ctx, "ic-commit-completion") { ic ->
-                ic.commitCompletion(CompletionInfo(0, 0, text))
-            }
-        }
-    }
-
-    private object IcCommitCorrectionAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val offset = argInt(args, "offset") ?: return ctx.fail("ic-commit-correction: --arg offset=... required")
-            val oldText = args["old"] ?: return ctx.fail("ic-commit-correction: --arg old=... required")
-            val newText = args["new"] ?: return ctx.fail("ic-commit-correction: --arg new=... required")
-            if (offset < 0) return ctx.fail("ic-commit-correction: offset must be >= 0")
-            return withActiveInputConnection(ctx, "ic-commit-correction") { ic ->
-                ic.commitCorrection(CorrectionInfo(offset, oldText, newText))
-            }
-        }
-    }
-
-    private object IcReplaceTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val start = argInt(args, "start") ?: return ctx.fail("ic-replace-text: --arg start=... required")
-            val end = argInt(args, "end") ?: return ctx.fail("ic-replace-text: --arg end=... required")
-            val text = args["text"] ?: return ctx.fail("ic-replace-text: --arg text=... required")
-            if (start < 0 || end < 0) return ctx.fail("ic-replace-text: start/end must be >= 0")
-            return withActiveInputConnection(ctx, "ic-replace-text") { ic ->
-                ic.replaceText(start, end, text, 1, null)
-            }
-        }
-    }
-
-    private object IcSetComposingTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val text = args["text"] ?: return ctx.fail("ic-set-composing-text: --arg text=... required")
-            return withActiveInputConnection(ctx, "ic-set-composing-text") { ic ->
-                ic.setComposingText(text, 1)
-            }
-        }
-    }
-
-    private object IcSetComposingRegionAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val start = argInt(args, "start") ?: return ctx.fail("ic-set-composing-region: --arg start=... required")
-            val end = argInt(args, "end") ?: return ctx.fail("ic-set-composing-region: --arg end=... required")
-            if (start < 0 || end < 0) return ctx.fail("ic-set-composing-region: start/end must be >= 0")
-            return withActiveInputConnection(ctx, "ic-set-composing-region") { ic ->
-                ic.setComposingRegion(start, end)
-            }
-        }
-    }
-
-    private object IcFinishComposingAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            return withActiveInputConnection(ctx, "ic-finish-composing") { ic ->
-                ic.finishComposingText()
-            }
-        }
-    }
-
-    private object IcSetSelectionAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val start = argInt(args, "start") ?: return ctx.fail("ic-set-selection: --arg start=... required")
-            val end = argInt(args, "end") ?: return ctx.fail("ic-set-selection: --arg end=... required")
-            if (start < 0 || end < 0) return ctx.fail("ic-set-selection: start/end must be >= 0")
-            return withActiveInputConnection(ctx, "ic-set-selection") { ic ->
-                ic.setSelection(start, end)
-            }
-        }
-    }
-
-    private object IcDeleteSurroundingTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val before = argInt(args, "before", 0)!!
-            val after = argInt(args, "after", 0)!!
-            return withActiveInputConnection(ctx, "ic-delete-surrounding-text") { ic ->
-                ic.deleteSurroundingText(before, after)
-            }
-        }
-    }
-
-    private object IcDeleteSurroundingTextInCodePointsAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val before = argInt(args, "before", 0)!!
-            val after = argInt(args, "after", 0)!!
-            return withActiveInputConnection(ctx, "ic-delete-surrounding-text-codepoints") { ic ->
-                ic.deleteSurroundingTextInCodePoints(before, after)
-            }
-        }
-    }
-
-    /**
-     * Drive [TawcInputConnection.sendKeyEvent] with an `ACTION_DOWN`
-     * [KeyEvent]. The IC drops everything that isn't `ACTION_DOWN`, and
-     * tests only ever care about key-down (which is what produces the
-     * `wl_keyboard` press the client reacts to). For Backspace tests
-     * prefer [IcDeleteSurroundingTextAction] — the IC translates that
-     * into the same Backspace key event but also keeps the Editable
-     * mirror in step.
-     */
-    private object IcSendKeyEventAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val keycode = argInt(args, "keycode") ?: return ctx.fail("ic-send-key-event: --arg keycode=... required")
-            if (keycode < 0) return ctx.fail("ic-send-key-event: keycode must be >= 0")
-            return withActiveInputConnection(ctx, "ic-send-key-event") { ic ->
-                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keycode))
-            }
-        }
-    }
-
-    private object IcSendModifiedKeyEventAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val keycode = argInt(args, "keycode")
-                ?: return ctx.fail("ic-send-modified-key-event: --arg keycode=... required")
-            if (keycode < 0) return ctx.fail("ic-send-modified-key-event: keycode must be >= 0")
-            var metaState = 0
-            if (argBool(args, "ctrl")) metaState = metaState or KeyEvent.META_CTRL_ON
-            if (argBool(args, "alt")) metaState = metaState or KeyEvent.META_ALT_ON
-            if (argBool(args, "shift")) metaState = metaState or KeyEvent.META_SHIFT_ON
-            return withActiveInputConnection(ctx, "ic-send-modified-key-event") { ic ->
-                ic.sendKeyEvent(KeyEvent(0, 0, KeyEvent.ACTION_DOWN, keycode, 0, metaState))
-            }
-        }
-    }
-
-    private object IcFinishHiddenComposingAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            var ok = false
-            val ran = onMainBlocking {
-                val recorder = NativeBridge.imeOutput as? RecordingImeOutput
-                ok = recorder?.finishHiddenComposingTextForDev() == true
-            }
-            if (!ran) return ctx.fail("main loop did not run ic-finish-hidden-composing within 5s")
-            return if (ok) 0 else ctx.fail("ic-finish-hidden-composing: no hidden test InputConnection")
-        }
-    }
-
-    private object HardwareKeyAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val keycode = argInt(args, "keycode")
-                ?: return ctx.fail("hardware-key: --arg keycode=... required")
-            if (keycode < 0) return ctx.fail("hardware-key: keycode must be >= 0")
-            val repeat = argInt(args, "repeat", 0)!!
-            if (repeat < 0) return ctx.fail("hardware-key: repeat must be >= 0")
-            val action = args["action"] ?: "press"
-            if (action !in setOf("down", "up", "press")) {
-                return ctx.fail("hardware-key: action must be down, up, or press")
-            }
-
-            var handled = false
-            val status = withFocusedActivity(ctx) { activity ->
-                handled = when (action) {
-                    "down" -> activity.dispatchHardwareKeyForDev(keycode, true, repeat)
-                    "up" -> activity.dispatchHardwareKeyForDev(keycode, false, repeat)
-                    else -> {
-                        val down = activity.dispatchHardwareKeyForDev(keycode, true, repeat)
-                        val up = activity.dispatchHardwareKeyForDev(keycode, false, 0)
-                        down && up
-                    }
-                }
-            }
-            if (status != 0) return status
-            return if (handled) 0 else ctx.fail("hardware-key: keycode $keycode was not handled")
-        }
-    }
-
-    /**
-     * Dispatch Android Back through the focused activity's back-press
-     * path on the main thread — the entry the system OnBackInvoked
-     * callback / legacy onBackPressed route into. Activity-level rather
-     * than system input dispatch; the compositor Back handling under
-     * test lives below that boundary either way.
-     */
-    private object BackAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            var handled = false
-            val status = withFocusedActivity(ctx) { activity ->
-                handled = activity.dispatchBackForDev()
-            }
-            if (status != 0) return status
-            return if (handled) 0 else ctx.fail("back: focused activity not initialized")
-        }
-    }
-
-    /**
-     * Inject deterministic touch sequences into the focused SurfaceView.
-     * Coordinates are normalized inside CompositorActivity, so host tests
-     * do not depend on a particular device resolution.
-     */
-    private object InjectTouchAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val kind = args["kind"] ?: return ctx.fail("inject-touch: --arg kind=tap|tap-logical|tap-outside-popup|tap-menu-a|tap-menu-b|drag|multitouch required")
-            if (kind !in setOf("tap", "tap-logical", "tap-outside-popup", "tap-menu-a", "tap-menu-b", "drag", "multitouch")) {
-                return ctx.fail("inject-touch: unknown kind '$kind'")
-            }
-            val x = args["x"]?.toFloatOrNull()
-            val y = args["y"]?.toFloatOrNull()
-            if ((args["x"] != null && x == null) || (args["y"] != null && y == null)) {
-                return ctx.fail("inject-touch: x/y must be numbers")
-            }
-            var injectError: String? = null
-            val status = withFocusedActivity(ctx) { activity ->
-                injectError = activity.injectTouchSequenceForDev(kind, x, y)
-            }
-            if (status != 0) return status
-            return injectError?.let { ctx.fail("inject-touch: $it") } ?: 0
-        }
-    }
-
-    /**
-     * `inject-pointer` — drive real mouse input through the focused
-     * SurfaceView. Same rule as [InjectTouchAction]: the Activity's own
-     * MotionEvent decoding (source split, button-mask diff, hover rules) is
-     * part of what the test exercises, so this builds `SOURCE_MOUSE` events
-     * rather than calling the native trampoline.
-     */
-    private object InjectPointerAction : BrokerAction {
-        private val KINDS = setOf("move", "button", "scroll", "hscroll", "hover-exit")
-
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val kind = args["kind"]
-                ?: return ctx.fail("inject-pointer: --arg kind=${KINDS.joinToString("|")} required")
-            if (kind !in KINDS) {
-                return ctx.fail("inject-pointer: unknown kind '$kind'")
-            }
-            val x = args["x"]?.toFloatOrNull()
-            val y = args["y"]?.toFloatOrNull()
-            if ((args["x"] != null && x == null) || (args["y"] != null && y == null)) {
-                return ctx.fail("inject-pointer: x/y must be numbers")
-            }
-            val amount = args["amount"]?.let {
-                it.toFloatOrNull() ?: return ctx.fail("inject-pointer: amount must be a number")
-            } ?: 1f
-            var injectError: String? = null
-            val status = withFocusedActivity(ctx) { activity ->
-                injectError = activity.injectPointerSequenceForDev(
-                    kind, x, y, args["button"], amount,
-                )
-            }
-            if (status != 0) return status
-            return injectError?.let { ctx.fail("inject-pointer: $it") } ?: 0
-        }
-    }
-
-    // -- Observational + test-mode helpers ----------------------------------
-
-    /**
-     * `query-state` — return a compositor-thread state snapshot.
-     * Lives on the service rather than an activity so tests can poll it
-     * before any client window has focus (e.g. right after compositor
-     * boot, before the first GTK app has come up). Observational only —
-     * doesn't change input state.
-     */
-    private object QueryStateAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val state = NativeBridge.nativeQueryState()
-                ?: return ctx.fail("query-state: compositor did not return state")
-            ctx.out(state)
-            return 0
-        }
-    }
-
-    /**
      * `app-info` — static app facts the host can't cheaply learn via adb.
      * `nativeLibraryDir` is where the APK's jniLibs land on this device
      * (ABI-dependent); the tawcroot prod-env integration tests exec
@@ -511,122 +70,6 @@ internal object InputActions {
     private object AppInfoAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
             ctx.out("nativeLibraryDir=${ctx.appContext.applicationInfo.nativeLibraryDir}")
-            return 0
-        }
-    }
-
-    private object InputReadyAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            return withActiveInputConnection(ctx, "input-ready") {
-                ctx.out("ready")
-                true
-            }
-        }
-    }
-
-    private object FocusedActivityIdAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            return withFocusedActivity(ctx) {
-                ctx.out(it.activityIdForDev())
-            }
-        }
-    }
-
-    private object FocusedEditorInfoAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val info = (NativeBridge.imeOutput as? RecordingImeOutput)
-                ?.lastEditorInfoForDev()
-                ?: return ctx.fail("focused-editor-info: no test EditorInfo recorded")
-            ctx.out("inputType=${info.first} imeOptions=${info.second}")
-            return 0
-        }
-    }
-
-    /**
-     * `ime-selection-updates` — dump every recorded
-     * [ImeOutput.updateSelection] call as `selStart,selEnd,composingStart,
-     * composingEnd` lines, oldest first. This is the editor→IME boundary a
-     * real system IME watches: `composingStart=composingEnd=-1` is the
-     * "composition ended" signal IMEs react to with a defensive
-     * `finishComposingText`. Tests model that reaction (and assert the
-     * signal is absent during uninterrupted composition) without putting
-     * the nondeterministic system IME back in the loop.
-     */
-    private object ImeSelectionUpdatesAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val recorder = NativeBridge.imeOutput as? RecordingImeOutput
-                ?: return ctx.fail("ime-selection-updates: not in test mode (run test-init first)")
-            recorder.calls
-                .filterIsInstance<RecordingImeOutput.Call.UpdateSelection>()
-                .forEach {
-                    ctx.out("${it.selStart},${it.selEnd},${it.composingStart},${it.composingEnd}")
-                }
-            return 0
-        }
-    }
-
-    private object FocusActivityAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val activityId = args["activityId"]
-                ?: return ctx.fail("focus-activity: --arg activityId=... required")
-            val service = NativeBridge.serviceRefForDev()
-                ?: return ctx.fail("no CompositorService running (cold start the app first)")
-            var ok = false
-            val ran = onMainBlocking {
-                if (service.getActivity(activityId) == null) {
-                    ctx.err("focus-activity: no live Activity for $activityId")
-                    return@onMainBlocking
-                }
-                val intent = Intent(ctx.appContext, CompositorActivity::class.java).apply {
-                    action = Intent.ACTION_VIEW
-                    data = "tawc://activity/$activityId".toUri()
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT
-                }
-                ctx.appContext.startActivity(intent)
-                ok = true
-            }
-            if (!ran) return ctx.fail("main loop did not run focus-activity within 5s")
-            if (!ok) return 1
-            // startActivity from an app context silently no-ops when
-            // Android 10+ blocks background activity starts, so verify the
-            // target actually came forward instead of trusting the call.
-            val deadline = SystemClock.uptimeMillis() + 5_000
-            while (SystemClock.uptimeMillis() < deadline) {
-                var focused = false
-                if (!onMainBlocking {
-                    focused = service.getActivity(activityId)?.hasWindowFocus() == true
-                }) return ctx.fail("main loop did not run focus-activity within 5s")
-                if (focused) return 0
-                if (ctx.cancelFlag.get()) return 1
-                Thread.sleep(100)
-            }
-            return ctx.fail(
-                "focus-activity: $activityId did not gain window focus within 5s " +
-                    "(Android blocks activity starts while tawc is backgrounded)"
-            )
-        }
-    }
-
-    private object ClipboardSetTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val text = args["text"] ?: return ctx.fail("clipboard-set-text: --arg text=... required")
-            ClipboardBridge.setTextFromDevAction(text, asHtml = argBool(args, "html"))
-            return 0
-        }
-    }
-
-    private object ClipboardGetTextAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            ctx.out(ClipboardBridge.getTextForDevAction())
-            return 0
-        }
-    }
-
-    private object ClipboardDebugStateAction : BrokerAction {
-        override fun run(args: Map<String, String>, ctx: ActionContext): Int {
-            val state = NativeBridge.nativeClipboardDebugState()
-                ?: return ctx.fail("clipboard-debug-state: native state unavailable")
-            ctx.out(state)
             return 0
         }
     }
@@ -656,7 +99,7 @@ internal object InputActions {
     /**
      * `test-init` — fast per-test reset. Nothing here writes
      * SharedPreferences; app process death restores normal persisted
-     * settings and the production ImeOutput.
+     * settings.
      */
     private object TestInitAction : BrokerAction {
         override fun run(args: Map<String, String>, ctx: ActionContext): Int {
@@ -669,17 +112,8 @@ internal object InputActions {
                     .filterIsInstance<LogScreenActivity>()
                     .forEach { it.finish() }
                 Settings.enterTestMode()
-                NativeBridge.nativeSetTintBuffersByType(Settings.tintBuffersByType)
-                NativeBridge.nativeSetOutputScale(Settings.outputScale)
-                NativeBridge.nativeSetXwaylandEnabled(Settings.xwayland)
-                NativeBridge.nativeSetGtk3BrokenMenusWorkaround(Settings.gtk3BrokenMenusWorkaround)
-                clearRecordingImeOutput()
-                NativeBridge.activeInputConnection = null
-                NativeBridge.imeOutput = RecordingImeOutput()
             }
             if (!ran) return ctx.fail("main loop did not run test-init within 5s")
-            val closed = NativeBridge.nativeCloseAllClientsForTest()
-            if (closed < 0) return ctx.fail("compositor did not process close-all-clients request")
             var killedRootfs = 0
             if (!installId.isNullOrBlank()) {
                 killedRootfs = cleanupRootfs(ctx, installId)
@@ -689,7 +123,6 @@ internal object InputActions {
             // ando listeners don't leak across tests. notes/ando.md.
             InstallationStore.clearAndoOverrides()
             AndoBrokers.refresh(ctx.appContext)
-            ctx.out("closed=$closed")
             ctx.out("rootfs_killed=$killedRootfs")
             return 0
         }

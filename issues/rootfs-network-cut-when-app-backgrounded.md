@@ -8,8 +8,8 @@ It does not reproduce while watching the terminal.
 ## Cause
 
 `TerminalActivity` runs with **no foreground service** (a deliberate
-choice recorded in notes/terminal.md; the compositor's FGS is only
-started by `CompositorActivity` and `UserRootfsSession`). Backgrounding
+choice recorded in notes/terminal.md; `DshService`'s FGS is owned by the
+agent dock, not by the terminal). Backgrounding
 the app therefore drops the uid to a cached procstate, and ~1 minute
 after screen-off the device enters *light* Doze, where netd's
 `fw_dozable` chain blocks all traffic for non-allowlisted uids. Guest
@@ -24,7 +24,7 @@ processes run as the app uid, so the whole rootfs loses network at once.
   second as `Firewall chain dozable state: true`, and `dumpsys
   netpolicy` reports
   `blocked=DOZE|RESTRICTED_MODE, allowed=RESTRICTED_MODE_PERMISSIONS, effective=DOZE`.
-- Identical run with the compositor FGS up: `procState=FGS`,
+- Identical run with `DshService`'s FGS up: `procState=FGS`,
   `allowed=FOREGROUND…`, `effective=NONE` — traffic survives both light
   and deep Doze. The FGS is the whole difference.
 
@@ -50,13 +50,14 @@ neither detaching nor a new session escapes it.
 ## Fix sketch
 
 Keep a foreground service alive whenever *any* rootfs session exists,
-not only when the compositor runs — either have `TerminalSessions`
+not only when `DshService` runs — either have `TerminalSessions`
 start/stop a session FGS around live sessions, or add a generic
 rootfs-session service that any live guest process anchors to.
 notes/terminal.md says "promote to a service only if that becomes a
 real complaint"; this is that complaint. Prefer the `specialUse` type
-already used by the compositor — `dataSync` foreground services are
-subject to a daily time limit on recent Android versions.
+already used by `DshService` (notification channel `tawc_dsh`) —
+`dataSync` foreground services are subject to a daily time limit on
+recent Android versions.
 
 Note an FGS is necessary but not always sufficient: a RESTRICTED
 standby bucket, user "restrict battery usage", or an aggressive OEM ROM

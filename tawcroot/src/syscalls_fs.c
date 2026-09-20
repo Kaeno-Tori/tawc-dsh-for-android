@@ -277,7 +277,7 @@ static long handle_openat(const tawcroot_syscall_args *args, ucontext_t *uc)
 	 * "no PCI devices visible" state libpci handles cleanly: callers
 	 * see an empty device list, log "no GPU found via PCI", and
 	 * continue to whatever non-PCI probe they have (eglQueryString
-	 * for Mozilla). See notes/firefox.md "libpci probe".
+	 * for Mozilla).
 	 *
 	 * Only intercept O_RDONLY (no O_DIRECTORY, no O_PATH). Other flag
 	 * combos fall through to normal translation so the kernel produces

@@ -4,7 +4,6 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.io.InterruptedIOException
-import java.net.HttpURLConnection
 import java.net.URL
 
 /**
@@ -60,7 +59,7 @@ object Downloader {
         val tmp = File(dest.parentFile, dest.name + ".part")
         tmp.delete()
 
-        val conn = (URL(resolvedUrl).openConnection() as HttpURLConnection).apply {
+        val conn = Http.open(resolvedUrl).apply {
             connectTimeout = 30_000
             readTimeout = 300_000
             instanceFollowRedirects = true
@@ -128,7 +127,7 @@ object Downloader {
     private fun head(initialUrl: String): Pair<String, Long?> {
         var url = initialUrl
         repeat(MAX_REDIRECTS) {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            val conn = Http.open(url).apply {
                 requestMethod = "HEAD"
                 connectTimeout = 15_000
                 readTimeout = 15_000

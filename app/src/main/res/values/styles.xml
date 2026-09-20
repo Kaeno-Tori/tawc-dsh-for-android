@@ -1,71 +1,195 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- Default theme for Activities that show normal Android UI (home,
-         install, uninstall, distro info). Material3 DayNight gives us
-         automatic light/dark theming; the accent (colorPrimary) is a
-         warm orange that drives Install/Open buttons. Destructive
-         actions opt out of the accent and use @color/tawc_danger. -->
+    <!--
+      Theme for Activities that show normal Android UI (setup, install,
+      distro info, settings, task manager, licenses).
+
+      Material3 still supplies the widget behaviour (ripples, states, dialog
+      layout); what this theme does is re-point every colour role Material
+      asks for at DSH's `dsw-alias-*` tokens, so the native screens and the
+      DSH page in the WebView are visibly the same product. See
+      values/colors.xml for the name-by-name mapping.
+
+      The two that carry the most weight:
+       - `colorPrimary` is DSH's near-black brand (which inverts to near-white
+         in dark mode). It drives filled buttons, radio buttons, switches and
+         the checked state of everything Material draws.
+       - `colorControlHighlight` is DSH's blue-tinted press wash, so every
+         Material widget ripples in DSH's colour instead of Material's grey.
+    -->
     <style name="Theme.Tawc" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowNoTitle">true</item>
 
         <item name="colorPrimary">@color/tawc_accent</item>
-        <item name="colorOnPrimary">@color/tawc_on_tonal</item>
-        <item name="colorPrimaryContainer">@color/tawc_accent</item>
+        <item name="colorOnPrimary">@color/tawc_on_accent</item>
+        <item name="colorPrimaryContainer">@color/tawc_tonal_bg</item>
         <item name="colorOnPrimaryContainer">@color/tawc_on_tonal</item>
+        <item name="colorPrimaryInverse">@color/tawc_on_accent</item>
+
+        <item name="colorSecondary">@color/tawc_tonal_bg</item>
+        <item name="colorOnSecondary">@color/tawc_on_tonal</item>
+        <item name="colorSecondaryContainer">@color/tawc_tonal_bg</item>
+        <item name="colorOnSecondaryContainer">@color/tawc_on_tonal</item>
 
         <item name="colorError">@color/tawc_danger</item>
         <item name="colorOnError">@color/tawc_on_danger</item>
+        <item name="colorErrorContainer">@color/tawc_danger</item>
+        <item name="colorOnErrorContainer">@color/tawc_on_danger</item>
 
-        <!-- Override the Material3 default surface so the page is a
-             muted grey rather than near-white/near-black. Cards then
-             pick the opposite extreme (white in light mode, near-black
-             in dark) to read as their own surface. -->
+        <!-- The page. DSH calls this `bg-base`, and it is the same value as
+             `colorSurface` on purpose: a Material surface that differed from
+             the window would put a second, lighter rectangle behind the
+             content column. -->
         <item name="android:windowBackground">@color/tawc_window_bg</item>
         <item name="colorSurface">@color/tawc_window_bg</item>
 
-        <!-- Tint the system bars to the window surface so the
-             accent doesn't bleed into the status bar. windowLightStatusBar
-             flips icons to dark for light mode; values-night/styles.xml
-             overrides it back to false for dark mode. -->
+        <!-- Text roles. `colorOnSurfaceVariant` is what Material treats as
+             "secondary text"; pointing it at DSH's label-secondary is why an
+             unstyled TextView already reads correctly. -->
+        <item name="colorOnSurface">@color/tawc_label_primary</item>
+        <item name="colorOnSurfaceVariant">@color/tawc_label_secondary</item>
+        <item name="colorOnBackground">@color/tawc_label_primary</item>
+        <item name="android:colorBackground">@color/tawc_window_bg</item>
+
+        <!-- Inputs (`border-l4`) and hairlines (`border-l2`). -->
+        <item name="colorOutline">@color/tawc_outline</item>
+        <item name="colorOutlineVariant">@color/tawc_divider</item>
+
+        <!-- `bg-layer-1` for anything Material lifts off the page: dialogs,
+             menus, sheets. -->
+        <item name="colorSurfaceContainerHigh">@color/tawc_card_bg</item>
+        <item name="colorSurfaceContainerHighest">@color/tawc_card_bg</item>
+        <item name="colorSurfaceContainer">@color/tawc_card_bg</item>
+        <item name="colorSurfaceContainerLow">@color/tawc_window_bg</item>
+        <item name="colorSurfaceContainerLowest">@color/tawc_window_bg</item>
+        <item name="colorSurfaceBright">@color/tawc_card_bg</item>
+        <item name="colorSurfaceDim">@color/tawc_window_bg</item>
+
+        <!-- The press wash. Set on both the app and the platform attribute:
+             Material widgets read the app one, platform widgets the other,
+             and a mismatch is visible as two different ripple greys. -->
+        <item name="colorControlHighlight">@color/tawc_ripple</item>
+        <item name="android:colorControlHighlight">@color/tawc_ripple</item>
+
+        <!-- The "on" tint for switches, radios and checkboxes. Radios and
+             checkboxes are built from the *platform* widget (they are
+             `new RadioButton(context)`, not Material's subclass, so they
+             read `android:` attributes), and with this unset they fell back
+             to a colour that made a selected radio invisible — a filled
+             pale disc next to three dark rings, i.e. the opposite of what
+             it should look like. DSH's brand is the near-black cap. -->
+        <item name="colorControlActivated">@color/tawc_accent</item>
+        <item name="android:colorControlActivated">@color/tawc_accent</item>
+
+        <!-- Tint the system bars to the page so the palette doesn't break at
+             the window edge.
+
+             The icon brightness is the *only* thing that differs between
+             day and night in this theme, and it comes from
+             `@bool/tawc_light_system_bars` rather than a literal so that
+             `values-night/` does not have to restate this whole style —
+             see values/bools.xml. -->
         <item name="android:statusBarColor">?attr/colorSurface</item>
         <item name="android:navigationBarColor">?attr/colorSurface</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLightStatusBar">@bool/tawc_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/tawc_light_system_bars</item>
     </style>
 
-    <style name="TextAppearance.Tawc.HomeTitle" parent="TextAppearance.Material3.TitleLarge">
+    <!--
+      Type scale, taken from DSH's `dsw-font-*` tokens (CSS custom
+      properties, named without their leading dashes).
+
+      DSH's sizes stop at 24 and its weights stop at 600 — there is no bold
+      anywhere in the product's UI chrome, and almost nothing above 16sp.
+      Sizes, line heights and weights below are copied from the tokens
+      (`dsw-font-s-14` = `14px/22px`, etc.); the names are the app's own,
+      kept because 70 call sites reference them.
+
+        SectionTitle  dsw-font-l-20           20/28  500
+        CardTitle     dsw-font-m-18           16/28  500
+        BodyLarge     dsw-font-base-16        16/24  400
+        Body          dsw-font-s-14           14/22  400
+        BodyStrong    dsw-font-s-strong-14    14/22  500
+        BodySmall     dsw-font-xs-13          13/20  400
+        Caption       dsw-font-xxs-12         12/18  400
+        CaptionSmall  dsw-font-xxxs-11        11/14  400
+        Metric        dsw-font-xl-24          24/32  600
+
+      Android has no 600 in the system family stack, so both 500 and 600 map
+      to `sans-serif-medium` (the closest available cut); 400 stays the
+      default sans-serif. Colours are deliberately not set here: callers pick
+      between label-primary and label-secondary (`tawcSecondaryColor`), and a
+      TextAppearance that baked one in would fight that.
+    -->
+
+    <!-- A section heading inside a page, and a screen header's title. -->
+    <style name="TextAppearance.Tawc.SectionTitle" parent="TextAppearance.Material3.TitleLarge">
+        <item name="android:textSize">20sp</item>
+        <item name="android:lineHeight">28sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <!-- A block's own title, and the primary label of a list row. -->
+    <style name="TextAppearance.Tawc.CardTitle" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textSize">16sp</item>
+        <item name="android:lineHeight">28sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <!-- 16sp body: a row's primary line when the text is content — a command
+         line, a path — rather than the row's title. -->
+    <style name="TextAppearance.Tawc.BodyLarge" parent="TextAppearance.Material3.BodyLarge">
+        <item name="android:textSize">16sp</item>
+        <item name="android:lineHeight">24sp</item>
+    </style>
+
+    <!-- Primary body: settings rows, list items, dialog text. -->
+    <style name="TextAppearance.Tawc.Body" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textSize">14sp</item>
+        <item name="android:lineHeight">22sp</item>
+    </style>
+
+    <!-- The emphasised variant of [Body] — a row title that is not a heading.
+         DSH uses 500 here rather than a size step. -->
+    <style name="TextAppearance.Tawc.BodyStrong" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textSize">14sp</item>
+        <item name="android:lineHeight">22sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <!-- The explanatory line under a heading, and secondary row content. -->
+    <style name="TextAppearance.Tawc.BodySmall" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textSize">13sp</item>
+        <item name="android:lineHeight">20sp</item>
+    </style>
+
+    <!-- Captions, footnotes, timestamps. -->
+    <style name="TextAppearance.Tawc.Caption" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textSize">12sp</item>
+        <item name="android:lineHeight">18sp</item>
+    </style>
+
+    <!-- The emphasised variant of [Caption]: a row's key in a label/value
+         pair. DSH's `dsw-font-xxs-strong-12`. -->
+    <style name="TextAppearance.Tawc.CaptionStrong" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textSize">12sp</item>
+        <item name="android:lineHeight">18sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <!-- Operation-log lines and other dense footnotes. -->
+    <style name="TextAppearance.Tawc.CaptionSmall" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textSize">11sp</item>
+        <item name="android:lineHeight">14sp</item>
+    </style>
+
+    <!-- The one oversized number a screen puts on display (the task
+         manager's CPU percentage). DSH's largest step. -->
+    <style name="TextAppearance.Tawc.Metric" parent="TextAppearance.Material3.HeadlineMedium">
         <item name="android:textSize">24sp</item>
-        <item name="android:textStyle">bold</item>
-    </style>
-
-    <style name="Theme.Tawc.Launcher" parent="Theme.Tawc">
-        <item name="android:windowIsFloating">true</item>
-        <item name="android:windowCloseOnTouchOutside">true</item>
-        <item name="android:backgroundDimEnabled">true</item>
-        <item name="android:windowBackground">@drawable/tawc_popup_bg</item>
-        <item name="android:windowMinWidthMajor">0%</item>
-        <item name="android:windowMinWidthMinor">0%</item>
-    </style>
-
-    <!-- Host theme for activities that only show a dialog
-         (LaunchErrorActivity): the window itself is invisible; the
-         MaterialAlertDialog provides the surface and dim. -->
-    <style name="Theme.Tawc.DialogHost" parent="Theme.Tawc">
-        <item name="android:windowBackground">@android:color/transparent</item>
-        <item name="android:windowIsTranslucent">true</item>
-        <item name="android:windowAnimationStyle">@null</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
-    </style>
-
-    <!-- Compositor activity stays on the device-default theme: it draws
-         its own surface and never inflates Material widgets, so pulling
-         Material3 in here would just bloat the resource table for no win.
-         Fullscreen is toggled at runtime from xdg_toplevel state. -->
-    <style name="Theme.Tawc.Compositor" parent="android:Theme.DeviceDefault.NoActionBar">
-        <item name="android:windowNoTitle">true</item>
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:lineHeight">32sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
     </style>
 
 </resources>

@@ -1,21 +1,5 @@
 # Android Integration
 
-## Wayland Socket Sharing
-
-**With root (chroot):** The compositor creates a Unix socket at a known path and the
-chroot client connects directly. Root bypasses SELinux MAC checks on `connect()`.
-This is the current development approach.
-
-**Without root (proot, future goal):** SELinux blocks cross-app `connect()` between
-`untrusted_app` domains on Android 9+. Two viable solutions:
-
-1. **Binder fd passing (preferred):** Compositor creates a `socketpair()`, passes one end
-   to Termux via a ContentProvider or bound Service as a `ParcelFileDescriptor`. No
-   `connect()` syscall occurs, so SELinux is never triggered.
-
-2. **Shared UID:** `sharedUserId="com.termux"` makes both apps run as same UID/SELinux
-   domain. Deprecated since API 33 but still functional. Limits distribution flexibility.
-
 ## Chroot Setup
 
 Install (once, via the dev exec broker; progress streams to your TTY
@@ -38,7 +22,7 @@ recorded method from `metadata.json` and dispatches to the matching
 [InstallationMethod.startInside], which builds the bind table and
 chroot exec fresh in Kotlin on every call. There is no on-disk
 wrapper script and no `adb shell su` in this path — chroot installs
-fork `su` from inside the JVM. Generic tawc Wayland env vars come
+fork `su` from inside the JVM. Generic tawc env vars come
 from `RootfsEnv.kt` via a `/usr/bin/env -i KEY=VAL …` wrapper around
 the in-rootfs `bash -lc`, so nothing inside the rootfs needs to be
 on disk between calls.
@@ -67,56 +51,28 @@ Variable expansion like `$0` or `$KSH_VERSION` at any intermediate layer can
 give misleading results. The `su` shell on Android is mksh (`/system/bin/sh`),
 easily confused with the chroot's GNU bash.
 
-## EGL Context and Surfaces
-
-- An EGL context CAN move between threads (release on old, bind on new), but expensive
-- One thread can render to multiple EGLSurfaces via `eglMakeCurrent` switches
-- Each switch flushes the pipeline -- overhead per switch
-- Recommended: single render thread, one context, switch surfaces per window
-- `ASurfaceTransaction` + AHB avoids `eglMakeCurrent` overhead entirely (future opt)
-
-## Multiple Activities
-
-See [multi-activity.md](multi-activity.md) for the full per-window-task plan.
-Background facts that informed it:
-
-- All Activities in one app share the same process (single heap, static state, threads)
-- One SurfaceView per Activity avoids Z-ordering issues
-- Single background render thread maintains list of active surfaces
-- Activity launch creates visual transitions -- suppress with
-  `overridePendingTransition(0, 0)`
-- Activities may be killed under memory pressure -- handle surface loss gracefully
-
 ## Kotlin App Structure
 
-The Android app code (`app/src/main/java/me/phie/tawc/`) is split so that
-everything talking to the Rust compositor lives in its own package, separate from
-the rest of the app's UI/management features.
+`MainActivity.kt` is the app's entry point (the only
+`category.LAUNCHER` Activity) and a single-container state machine:
+setup (one-tap default install, the custom form, or import-a-pack),
+live install progress inline, failure, a completion receipt, then
+straight into `dsh/DshActivity` once the container is READY.
 
-- `MainActivity.kt` — home screen. Plain Android UI (no fullscreen, no Wayland).
-  Hosts buttons that launch the compositor and the installation manager.
-- `compositor/` — everything that interacts with the Rust compositor:
-  - `CompositorActivity.kt` — fullscreen immersive Activity that owns the
-    `SurfaceView`, dispatches touch/IME, and registers the test broadcast
-    receiver. Started via Intent from `MainActivity`. Uses the
-    `Theme.Tawc.Compositor` style.
-  - `NativeBridge.kt` — JNI surface (matches Rust JNI symbols
-    `Java_me_phie_tawc_compositor_NativeBridge_*` and `find_class
-    "me/phie/tawc/compositor/NativeBridge"` in `compositor/src/lib.rs`).
-  - `TawcInputConnection.kt` — IME bridge.
-- `install/` — Kotlin implementation of the chroot install / run /
-  destroy logic. The rootfs is stored under
-  `/data/data/me.phie.tawc/distros/<id>/rootfs/` so uninstalling
-  the app reclaims it. The host-side counterpart is
-  `scripts/rootfs-run.sh`, which routes through the dev exec broker
-  to the same [InstallationMethod.startInside]. See
-  [installation.md](installation.md) for the package map, the
-  broker `--action install/uninstall` CLI, and the Android 14 FGS
-  rationale.
+The rest of the app code (`app/src/main/java/me/phie/tawc/`) is split
+by feature package — `dsh/` (the agent dock), `terminal/`, `tasks/`,
+`install/` (the chroot install / run / destroy logic; the rootfs lives
+under the app's private data dir so uninstalling the app reclaims it),
+`ops/`, `ando/`, `ui/`, `licenses/`. The host-side counterpart to the
+in-app entry points is `scripts/rootfs-run.sh`, which routes through
+the dev exec broker to [InstallationMethod.startInside]. See
+[architecture.md](architecture.md) for the module layout, and
+[installation.md](installation.md) for the install package map, the
+broker `--action install/uninstall` CLI, and the Android 14 FGS
+rationale.
 
-When adding new app features (settings, app launcher, …), put them in
-their own packages under `me.phie.tawc.*` rather than mixing them into
-the compositor or install packages.
+When adding new app features (settings, task manager, …), put them in
+their own packages under `me.phie.tawc.*`.
 
 ## Audio
 

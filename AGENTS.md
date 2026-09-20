@@ -1,12 +1,12 @@
-Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scripts for running desktop Linux programs on Android.
+DSH on Android (this fork of tawc) is an Android app that runs the DSH
+agent: a WebView talking HTTP to a `dsh web` harness living in a Linux
+container, with a GPU-backed container for local inference. There is no
+desktop GUI and no display stack — see TAWC_DSH_DESIGN.md.
 
 ## Quick Reference
 - Build APK: `scripts/build-app.sh`
 - Build/install/launch: `scripts/app-build-install.sh` (`--no-build`, `--no-launch` supported)
-- Compositor Rust check: use the Android build path (`scripts/build-app.sh` or Gradle app tasks). Do **not** run host `cargo check --manifest-path compositor/Cargo.toml`; `ndk-sys` only compiles for Android.
 - Run in rootfs: `scripts/rootfs-run.sh '<command>'` or interactive with no command
-- Run Firefox: `scripts/rootfs-run.sh 'firefox --no-remote'`
-- Run lxterminal: `scripts/rootfs-run.sh 'lxterminal'`
 - Integration tests: `scripts/run-integration-tests.sh [filter]` (builds/installs test deps as needed; `--no-build` reuses existing deploy)
 - tawcroot tests: `tawcroot/test.sh [--host|--device] [--no-build] [FILTER...]`
 - App unit tests: `./gradlew :app:testDebugUnitTest`
@@ -15,10 +15,9 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 
 ## Current Project Shape
 - Install methods: `tawcroot` is default and the only release-supported method. `proot` and `chroot` are debug-only dev-loop options.
-- Supported distros are **Arch Linux ARM** and **Debian sid** (Arch x86_64 stands in for ALARM on the emulator). Manjaro ARM and Void still ship in every build but are dev-only, behind the install form's "Other distros" expander — see [notes/distro-options.md](notes/distro-options.md).
-- Graphics backends: `libhybris`, `libhybris-zink`, `gfxstream`, and `cpu` ship by default. `libhybris` works on all tested physical devices and is the production/default path. `gfxstream` is experimental/partial; it is the x86_64 emulator default only because libhybris is unsupported there. See [notes/gpu-strategy.md](notes/gpu-strategy.md), [notes/libhybris-zink.md](notes/libhybris-zink.md), and [notes/gfxstream-bridge.md](notes/gfxstream-bridge.md).
+- Supported distros are **Arch Linux ARM** and **Debian sid** (Arch x86_64 stands in for ALARM on the emulator). There is no dev-only tier and no "Other distros" expander: Manjaro ARM and Void Linux are gone — see [notes/distro-options.md](notes/distro-options.md).
+- Graphics: `libhybris` and `turnip` are the two shipped drivers, both **compute-only** — Turnip is headless (built without WSI) and libhybris reaches the vendor blob through our own null Vulkan platform plugin. The third member, `none`, is not a backend: it is the "no driver provisioned" state (and the emulator's x86_64 default). `cpu` was renamed to `none` because it shipped nothing and fell back to nothing — do not describe it as a software/CPU backend. There is no compositor, so `gfxstream` and `libhybris-zink` are gone with it. See [notes/gpu-strategy.md](notes/gpu-strategy.md) and TAWC_DSH_DESIGN.md §11.
 - The debug exec broker is the normal host-to-app command path. Host helper binary: `tests/integration/src/bin/tawc-exec.rs`; wrapper: `scripts/tawc-exec.sh`; protocol notes: [notes/exec-broker.md](notes/exec-broker.md).
-- SHM buffers are intentionally tinted magenta by default to expose fallback paths. Do not remove this unless explicitly asked.
 
 ## Operating Rules
 - Keep docs compact here. Put durable design/build details in `notes/`; start with [notes/README.md](notes/README.md).
@@ -28,13 +27,14 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - Use existing scripts instead of one-off adb/chroot commands when possible, if the scripts are broken fix them (or at least open an issue).
 - Only commit, amend, tag, or push when explicitly asked. Git push may hang without user approval.
 - Do not run formatting tools (`cargo fmt`, `rustfmt`, etc.) unless explicitly asked.
-- Do not edit `app/icon.svg` unless explicitly asked — it is the hand-drawn source of truth for the app icon. Every other form of the mark is generated from it by `scripts/gen-icon.sh`; after an asked-for icon change, run that script and commit the SVG plus all four generated files together. See [notes/building.md](notes/building.md) ("App icon").
+- Do not edit `app/icon.svg` unless explicitly asked — it is the hand-drawn source of truth for the app icon. Every other form of the mark is generated from it by `scripts/gen-icon.sh`; after an asked-for icon change, run that script and commit the SVG plus all three generated files together. See [notes/building.md](notes/building.md) ("App icon").
 - Keep prose, comments, errors, and commit messages short unless extra detail is genuinely useful.
 - Keep production logging sparse. Do not log per-frame work, per-input events, test-only milestones, or high-volume protocol chatter; prefer explicit query/debug surfaces for tests.
 
 ## Releases
-- Full process: [notes/release.md](notes/release.md). Versions are a plain counter (`1`, `2`, …); `versionName` in `app/build.gradle.kts` is the single source, `versionCode` derives from it.
-- When asked to prep a release: bump the version, draft release notes, write the F-Droid changelog and run `scripts/check-version-sync.sh` (nothing else in the repo should name the version statically), commit `release: vN`, tag `vN` (no push), then hand off — signing runs as the key-owning user where Claude is unavailable, so end by telling the user to run `scripts/build-release-apk.sh` and the remaining publish steps from the notes.
+- Full process: [notes/release.md](notes/release.md). Versions are `major.minor[.patch]`, starting at `0.1`; `versionName` in `app/build.gradle.kts` is the single source and `versionCode` is derived from it there. Nothing else in the repo names a version statically.
+- Releases are GitHub release assets only — there is no app-store distribution, and the store machinery was removed (§13.5 of TAWC_DSH_DESIGN.md). Do not reintroduce fastlane metadata or a store recipe.
+- When asked to prep a release: bump `versionName`, draft release notes (they become the GitHub release body), run `scripts/check-version-sync.sh`, commit `release: v<versionName>`, tag `v<versionName>` (no push), then hand off — the sign step needs the keystore password, so end by telling the user to run `scripts/build-release-apk.sh` and the remaining publish steps from the notes.
 
 ## Issues
 - Issues live in `issues/`. Do not solve them unless asked or the fix falls out of current work.
@@ -55,9 +55,9 @@ Tess's Android Wayland Compositor (tawc) is an Android app plus rootfs/build scr
 - If `su` is available on a phone, prefer it over `adb root`.
 
 ## On-Device Files
-- Rootfs installs live under `/data/data/me.phie.tawc/distros/<id>/rootfs/`.
+- Rootfs installs live under `/data/data/io.github.kaeno_tori.tawc_dsh/distros/<id>/rootfs/`.
 - Test/debug scratch outside app-private data may only use `/data/local/tmp/tawc-dev/`, exposed by `scripts/lib/tawc-scratch.sh` and the Rust integration crate. Delete screenshots/debug artifacts when done.
-- Production code must not write `/data/local/...` or `/sdcard/...`; app-owned runtime state should live under `/data/data/me.phie.tawc/` so uninstall removes it.
+- Production code must not write `/data/local/...` or `/sdcard/...`; app-owned runtime state should live under `/data/data/io.github.kaeno_tori.tawc_dsh/` so uninstall removes it.
 - Do not clone external repos into `$HOME`. Use `deps/` for vendored/tooling checkouts, and delete temporary checkouts before finishing.
 
 ## Vendored Deps

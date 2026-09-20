@@ -5,9 +5,6 @@ import me.phie.tawc.install.distro.arch.ArchLinuxArm
 import me.phie.tawc.install.distro.arch.ArchLinuxX86_64
 import me.phie.tawc.install.distro.debian.DebianSidAarch64
 import me.phie.tawc.install.distro.debian.DebianSidX86_64
-import me.phie.tawc.install.distro.manjaro.ManjaroArm
-import me.phie.tawc.install.distro.voidlinux.VoidLinuxAarch64
-import me.phie.tawc.install.distro.voidlinux.VoidLinuxX86_64
 import me.phie.tawc.install.util.HostArch
 
 /**
@@ -16,14 +13,18 @@ import me.phie.tawc.install.util.HostArch
  *
  * Existing on-disk records use `distro = "arch"` for both Arch Linux
  * and Arch Linux ARM, so disambiguation is by Android ABI.
+ *
+ * Every entry here is user-supported, so the install form has no
+ * "Other distros" tier any more: Manjaro ARM and Void Linux were the
+ * two dev-only entries, and they are gone. Manjaro resolved its
+ * bootstrap through the GitHub Releases API and Void through a
+ * minisign-signed `sha256sum.txt` — both whole verification paths, not
+ * just a list entry.
  */
 object DistroRegistry {
     val all: List<Distro> = listOf(
         ArchLinuxX86_64,
         ArchLinuxArm,
-        ManjaroArm,
-        VoidLinuxX86_64,
-        VoidLinuxAarch64,
         DebianSidX86_64,
         DebianSidAarch64,
     )
@@ -58,16 +59,6 @@ object DistroRegistry {
     fun availableForHost(): List<Distro> =
         all.filter { it.androidAbi == HostArch.primaryAbi() }
             .sortedByDescending { it.supported }
-
-    /**
-     * The distros we actually support for users (see [Distro.supported]),
-     * installable on this host. The install form lists these directly;
-     * [otherForHost] goes behind an expander.
-     */
-    fun supportedForHost(): List<Distro> = availableForHost().filter { it.supported }
-
-    /** Host-installable distros that are shipped but not supported. */
-    fun otherForHost(): List<Distro> = availableForHost().filterNot { it.supported }
 
     /**
      * Distro auto-selected for a fresh install on this host when the

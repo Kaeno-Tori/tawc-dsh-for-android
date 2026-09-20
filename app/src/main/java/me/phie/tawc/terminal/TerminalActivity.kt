@@ -41,15 +41,13 @@ import java.io.IOException
  * tawcroot as the pty child ([TawcrootMethod.ptyShellExec]), so the
  * in-rootfs bash gets a real controlling tty — readline, job control
  * and curses apps work, unlike the pipe-fed RunCommandOp path. No
- * compositor involvement: the Wayland env vars are set but nothing
- * waits for the socket, so the terminal works with the graphics stack
- * cold (launching a GUI app from it requires a compositor started via
- * Run/launcher).
+ * display stack sits in front of it: the terminal is the whole UX,
+ * and there is nothing to wait for before the shell is usable.
  *
  * One terminal activity per distro, multiple shell sessions as tabs:
  * documentLaunchMode="intoExisting" plus a unique tawc://terminal/<id>
- * data URI reuse the activity instance and recents card per id (same
- * trick as CompositorActivity). The sessions and tab selection live in
+ * data URI reuse the activity instance and recents card per id. The
+ * sessions and tab selection live in
  * [TerminalSessions] so reopening/recreation reattaches. A compact
  * [TerminalTabBar] replaces the scaffold toolbar; one [TerminalView]
  * shows the selected session via `attachSession` (termux-app's own
@@ -59,7 +57,7 @@ import java.io.IOException
  * see ShellDefaults); unset and `~` titles show as "Term <n>".
  *
  * tawcroot-only: chroot spawns via su and proot is dev-only, so the
- * home-screen Terminal button is gated on the tawcroot method.
+ * DSH dock's Terminal action only opens for a tawcroot container.
  */
 class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessionClient {
 
@@ -174,28 +172,11 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
         extraKeysView.reload(extraKeysInfo, rowHeightPx)
         setContentView(root)
 
-        // A launcher entry with Terminal=true arrives as EXTRA_COMMAND
-        // (EntryLauncher). Consumed so same-process recreation doesn't
-        // respawn it — but removeExtra can't reach the system's stored
-        // copy of the task's base intent, which is redelivered pristine
-        // when the user reopens the task from recents after process
-        // death. savedInstanceState survives process death, so its
-        // presence means "restore, don't re-run the command".
-        val command =
-            if (savedInstanceState != null) null else consumeCommandExtras(intent)
-        var commandTabIndex = -1
-        if (command != null) {
-            val s = spawnSession(command.exec, command.label)
-            if (s != null) {
-                TerminalSessions.add(distroId, s)
-                commandTabIndex = TerminalSessions.list(distroId).size - 1
-            }
-        }
         var sessions = TerminalSessions.list(distroId)
         if (sessions.isEmpty()) {
             // Zero tabs = nothing to show; only this initial spawn
             // failure finishes the activity (cf. openNewTab).
-            val s = if (command != null) null else spawnSession()
+            val s = spawnSession()
             if (s == null) {
                 finish()
                 return
@@ -207,21 +188,19 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
             s.updateTerminalSessionClient(this)
             tabBar.addTab(labelFor(s, i))
         }
-        selectTab(if (commandTabIndex >= 0) commandTabIndex else TerminalSessions.selected(distroId))
+        selectTab(TerminalSessions.selected(distroId))
 
         terminalView.requestFocus()
     }
 
     /**
      * documentLaunchMode="intoExisting" routes repeat launches for this
-     * distro's URI here. A command launch (Terminal=true entry) opens a
-     * new tab running it; a plain launch just brings the task forward.
+     * distro's URI here. Nothing to do beyond adopting the new intent:
+     * the existing task is simply brought forward.
      */
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        val command = consumeCommandExtras(intent) ?: return
-        openNewTab(command.exec, command.label)
     }
 
     override fun onResume() {
@@ -253,36 +232,16 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
 
     // ---- tabs ------------------------------------------------------------
 
-    /** Command + tab label from a launcher-entry intent, or null. The
-     *  extras are removed so a retained/recreated intent can't respawn
-     *  the command. */
-    private data class CommandExtras(val exec: String, val label: String?)
-
-    private fun consumeCommandExtras(intent: android.content.Intent?): CommandExtras? {
-        val exec = intent?.getStringExtra(EXTRA_COMMAND) ?: return null
-        val label = intent.getStringExtra(EXTRA_LABEL)
-        intent.removeExtra(EXTRA_COMMAND)
-        intent.removeExtra(EXTRA_LABEL)
-        return CommandExtras(exec, label)
-    }
-
     /**
      * Spawn a fresh shell session, or toast and return null on failure:
      * ptyShellExec fails closed (IOException) on a bad external bind —
      * revoked all-files access, missing host dir
      * (notes/external-binds.md). The user fixes it under Manage binds /
      * settings.
-     *
-     * [command] (a launcher entry's Exec line) runs wrapped in the
-     * hold-open trailer so its output survives exit until a keypress;
-     * [label] names the tab until an OSC title arrives ([labelFor]).
      */
-    private fun spawnSession(command: String? = null, label: String? = null): TerminalSession? {
+    private fun spawnSession(): TerminalSession? {
         val exec = try {
-            method.ptyShellExec(
-                store.rootfsDir(distroId).absolutePath,
-                command = command?.let { "$it$HOLD_OPEN_TRAILER" },
-            )
+            method.ptyShellExec(store.rootfsDir(distroId).absolutePath)
         } catch (e: IOException) {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
             return null
@@ -294,7 +253,7 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
             exec.hostEnv.toTypedArray(),
             TRANSCRIPT_ROWS,
             this,
-        ).also { it.mSessionName = label }
+        )
     }
 
     private fun labelFor(session: TerminalSession, index: Int): CharSequence {
@@ -302,11 +261,9 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
         // The shipped bashrc defaults title tabs with the cwd
         // (ShellDefaults), so every fresh tab would read `~` — number
         // those by tab position instead, and use the same numbering
-        // while no title is set yet. Command tabs carry the launcher
-        // entry's name in mSessionName.
+        // while no title is set yet.
         return if (title == null || title == "~") {
-            session.mSessionName?.takeUnless { it.isBlank() }
-                ?: getString(R.string.terminal_tab_home, index + 1)
+            getString(R.string.terminal_tab_home, index + 1)
         } else {
             title
         }
@@ -329,8 +286,8 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
         terminalView.onScreenUpdated()
     }
 
-    private fun openNewTab(command: String? = null, label: String? = null) {
-        val session = spawnSession(command, label) ?: return // toast shown; existing tabs stay up
+    private fun openNewTab() {
+        val session = spawnSession() ?: return // toast shown; existing tabs stay up
         TerminalSessions.add(distroId, session)
         val index = TerminalSessions.list(distroId).size - 1
         tabBar.addTab(labelFor(session, index))
@@ -521,24 +478,6 @@ class TerminalActivity : AppCompatActivity(), TerminalViewClient, TerminalSessio
 
     companion object {
         const val EXTRA_ID = "id"
-
-        /** Shell fragment to run instead of an interactive shell (a
-         *  launcher entry's Exec line; same trust level as
-         *  EntryLauncher's own concatenation). */
-        const val EXTRA_COMMAND = "command"
-
-        /** Tab label for an [EXTRA_COMMAND] session (the entry name). */
-        const val EXTRA_LABEL = "label"
-
-        /**
-         * Appended to every [EXTRA_COMMAND] before spawn: the session
-         * would exit (and [onSessionFinished] drop the tab) the moment
-         * the command finishes, vanishing its output. Holding in `read`
-         * keeps the shell alive until a keypress, then the normal
-         * tab-removal flow runs — no session-lifecycle changes.
-         */
-        private const val HOLD_OPEN_TRAILER =
-            "; __c=$?; printf '\\n[exited %d — press any key]\\n' \"\$__c\"; read -rsn1"
 
         private const val TAG = "tawc-terminal"
         private const val TRANSCRIPT_ROWS = 4000

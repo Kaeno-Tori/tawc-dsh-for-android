@@ -1,10 +1,6 @@
 pub mod adb;
-pub mod compositor;
-pub mod debug_app;
 pub mod exec_broker;
 pub mod helpers;
-pub mod rootfs;
-pub mod rootfs_process;
 pub mod tawcroot_prodenv;
 
 use std::sync::OnceLock;
@@ -31,30 +27,28 @@ pub fn install_id() -> String {
 }
 
 /// In-rootfs graphics backend pick. Mirrors `me.phie.tawc.GraphicsBackend`
-/// (Kotlin). Tests pass a value to the spawn helpers
-/// ([`crate::rootfs_process::RootfsProcess::spawn_with`],
-/// [`crate::adb::rootfs_run_with`], `helpers::launch_and_wait_for_*`,
-/// `helpers::assert_renders_via_*`) to run that one client under a
-/// specific backend without touching the user's persisted Settings
-/// pick. The override travels over the broker as a `GRAPHICS <key>`
-/// header on the RUNINSIDE form (see `notes/exec-broker.md`); the
-/// backend-less call shapes (`spawn`, `rootfs_run`) honour the user's
-/// UI pick.
+/// (Kotlin). Tests pass a value to [`crate::adb::rootfs_run_with`] to run
+/// one spawn under a specific backend without touching the user's
+/// persisted Settings pick. The override travels over the broker as a
+/// `GRAPHICS <key>` header on the RUNINSIDE form (see
+/// `notes/exec-broker.md`); the backend-less [crate::adb::rootfs_run]
+/// honours the setting.
+///
+/// The display-only variants (`gfxstream`, `libhybris-zink`) went away
+/// with the compositor (TAWC_DSH_DESIGN.md §11.5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphicsBackend {
     Libhybris,
-    Gfxstream,
-    Cpu,
-    LibhybrisZink,
+    Turnip,
+    None,
 }
 
 impl GraphicsBackend {
     pub fn as_key(&self) -> &'static str {
         match self {
             GraphicsBackend::Libhybris => "libhybris",
-            GraphicsBackend::Gfxstream => "gfxstream",
-            GraphicsBackend::Cpu => "cpu",
-            GraphicsBackend::LibhybrisZink => "libhybris-zink",
+            GraphicsBackend::Turnip => "turnip",
+            GraphicsBackend::None => "none",
         }
     }
 }
@@ -65,7 +59,7 @@ fn resolve_install_id() -> String {
             return v;
         }
     }
-    let pkg = "me.phie.tawc";
+    let pkg = "io.github.kaeno_tori.tawc_dsh";
     let probe = format!(
         "for d in /data/data/{pkg}/distros/*/metadata.json; \
          do test -f \"$d\" && basename \"$(dirname \"$d\")\"; done"

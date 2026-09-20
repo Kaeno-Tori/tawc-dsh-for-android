@@ -1,0 +1,81 @@
+# Unit tests, on a runner that has this project's full toolchain.
+#
+# MANUAL-ONLY ON PURPOSE — do not add push/pull_request triggers until this
+# job has had one green run.
+#
+# Why it is not the usual one-liner: `:app:testDebugUnitTest` depends on
+# every native build task (turnip, libhybris, proot, tawcroot, ando,
+# andobridge), and `preBuild` runs `verifyDeps`, which refuses to build if
+# the vendored checkouts are missing or off-pin. Those checkouts are
+# gitignored (`deps/`, ~1.4 GB) and are cloned on demand by the build
+# scripts — so a bare runner has nothing, and this job has to provision a
+# cross-compilation toolchain and clone all of it before a single test
+# runs. That recipe has not been proven on a clean runner yet, and a
+# workflow that fails on every push is worse than no workflow at all.
+#
+# RUN IT FROM THE ACTIONS TAB after pushing. If it goes green, add:
+#
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+#     workflow_dispatch:
+#
+# Host packages below mirror notes/building.md ("Host packages"), which is
+# the source of truth; a package list that drifts from that table is a bug
+# in this file.
+
+name: CI
+
+on:
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    # Generous: deps clone + cross-builds on a cold cache.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      # The Rust toolchain and both Android targets come from
+      # rust-toolchain.toml, so rustup installs them on first use.
+      # cargo-ndk is a cargo subcommand, not a rustup component, so it
+      # cannot be pinned there — version from notes/building.md.
+      - name: Host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make pkg-config curl libarchive-tools file \
+            meson ninja-build bison autoconf automake libtool libtool-bin \
+            libltdl-dev perl python3 python3-libxml2 xsltproc libexpat1-dev \
+            libwayland-dev libwayland-bin libwayland-egl-backend-dev \
+            wayland-protocols libvulkan-dev patchelf \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libc6-arm64-cross \
+            linux-libc-dev-arm64-cross
+          cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: NDK ${{ env.NDK_VERSION }}
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # gitignored (~1.4 GB): Gradle's verifyDeps fails without it.
+      - name: Vendor deps
+        run: scripts/update-deps.sh
+
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --console=plain

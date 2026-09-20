@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Geometry for the app's own surfaces, following DSH's component metrics.
+
+  The values come from the web client's component CSS (in
+  `@deepseek-ai/dsh-client-ui-primitives`), where each one is spelled out:
+
+    Button.module.css      md: h36, pad 0 14, radius 18 (capsule), 14/22
+                           sm: h28, pad 0 10, radius 14, 12/18
+    Input.module.css       h32, radius 8, border .5px border-l4
+    Modal.module.css       内层 radius 8, 外层 24, pad 24, gap 20
+    Pill.module.css        h24, radius 12, 12/18
+    DisclosureRow.module.css  leading icon 16 + gap 6, title 13/24
+    dsl-web-radius       12 (the radius for a block, i.e. our "card")
+
+  (Those are CSS custom properties; the leading dashes are omitted because
+  an XML comment may not contain them.)
+
+  Two things are worth calling out because the previous pass got them
+  the other way round:
+
+   - **Buttons are capsules.** DSH's button is `border-radius: 18px` on a
+     36px height — a pill, taken straight from the Figma component. The
+     earlier "near-square reads as an action, pill reads as a chip" call
+     was the app's own taste, not DSH's.
+   - **A block is 12dp, not 16dp.** DSH's blocks are tighter than
+     Material's list cards; 16dp read as "Material app in DSH clothing".
+
+  The steps below are otherwise the same 4dp grid as before (4 / 8 / 12 /
+  16 / 24), and the type sizes in styles.xml are DSH's own (11–24).
+-->
+<resources>
+    <!-- Spacing, on a 4dp grid. -->
+    <dimen name="tawc_space_xs">4dp</dimen>
+    <dimen name="tawc_space_s">8dp</dimen>
+    <dimen name="tawc_space_m">12dp</dimen>
+    <dimen name="tawc_space_l">16dp</dimen>
+    <dimen name="tawc_space_xl">24dp</dimen>
+
+    <!-- The margin every screen's content column sits inside. DSH's screens
+         are inset 16px (24px inside a modal). -->
+    <dimen name="tawc_page_padding">16dp</dimen>
+
+    <!-- Block inset and the gap between blocks. -->
+    <dimen name="tawc_card_padding">16dp</dimen>
+    <dimen name="tawc_card_gap">12dp</dimen>
+
+    <!-- Corners. A block is 12, a control nested in it is 8 (inputs) or a
+         capsule; a modal is 24. -->
+    <dimen name="tawc_radius_panel">12dp</dimen>
+    <dimen name="tawc_radius_dialog">24dp</dimen>
+    <dimen name="tawc_radius_input">8dp</dimen>
+    <!-- Button capsule: half the button's height, so the two move together. -->
+    <dimen name="tawc_radius_button">18dp</dimen>
+
+    <!-- Hairline. DSH writes `.5px` in CSS; 1 physical pixel is the same
+         optical weight on every Android density, so this is a `px` dimen on
+         purpose — do not "fix" it to 1dp. -->
+    <dimen name="tawc_hairline">1px</dimen>
+
+    <!-- Controls. -->
+    <dimen name="tawc_button_height">36dp</dimen>
+    <dimen name="tawc_button_padding_h">14dp</dimen>
+    <dimen name="tawc_icon_button_size">36dp</dimen>
+    <dimen name="tawc_input_height">32dp</dimen>
+    <dimen name="tawc_input_padding_h">8dp</dimen>
+
+    <!-- The screen header: DSH's page header is a bare row, not a toolbar. -->
+    <dimen name="tawc_header_height">44dp</dimen>
+    <dimen name="tawc_icon_leading">20dp</dimen>
+
+    <!-- An icon sitting inline with text. -->
+    <dimen name="tawc_icon_inline">16dp</dimen>
+</resources>

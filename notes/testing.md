@@ -2,50 +2,41 @@
 
 ## Overview
 
-Automated integration tests for the compositor. Each `tests/<name>.rs`
-file is a submodule of a single `tests/integration.rs` test binary, so
-`cargo test` produces one combined libtest summary and selecting a
-subset is just a libtest substring filter (`<module>::test_name`).
+Automated integration tests for the rootfs runtime, the install
+pipeline, and the ando broker. Each `tests/<name>.rs` file is a
+submodule of a single `tests/integration.rs` test binary, so `cargo
+test` produces one combined libtest summary and selecting a subset is
+just a libtest substring filter (`<module>::test_name`).
+
+There is no display stack (TAWC_DSH_DESIGN.md §11.5), so nothing
+here drives a window, a renderer, or an input/IME bridge: the suite
+covers rootfs semantics, the bionic linker config, ando, and
+uninstall.
 
 ```
 tests/
-  apps/wayland-debug-app/     C + Wayland/Cairo protocol test client
+  apps/
+    libhybris-tls-repro/        sources for the repro in
+                                issues/hybris-tls-patcher-breaks-boringssl-fips-check.md
   integration/                Rust tests on host
+    src/                        harness modules; see "Key Modules"
+    src/bin/tawc-exec.rs        host helper binary for the exec broker
     tests/integration.rs        single test binary, declares the submodules
     tests/<module>.rs           one file per group; see its docstring
-    tests/cold_start.rs         separate binary, see below
 scripts/
   run-integration-tests.sh    Build everything, deploy, run integration tests
 ```
 
-**`cold_start` is the one exception**, because its assertions only hold
-before anything has opened a window: a client connecting to a compositor
-with zero hosts must still see a `wl_output` with a real mode. It is its
-own `[[test]]` target with `test = false`, so plain `cargo test` skips
-it; the run script invokes it explicitly (`cargo test --test cold_start`)
-right after the compositor-ready wait and before the main run, which is
-the only point where cold state provably exists. A failure there does
-not abort the main run — it is reported and folded into the exit status.
-Its `supertuxkart` case is the regression that hid for months behind
-warm suite ordering (see `issues/usecase_tests/`).
-
 Each test module's own docstring documents what it covers and what its
 prerequisites are. As of writing the modules are:
 
-| Module          | Backend pin | Scope |
-|-----------------|-------------|-------|
-| `apps`          | `cpu`       | App-level smoke: program launches, maps a toplevel, and (optionally) does something simple. **No buffer-type assertions.** Pair tests here with a deeper one in the per-backend modules when a buffer-path regression is worth catching separately. |
-| `libhybris`     | `libhybris` | TLS / bionic-linker regressions plus every "X renders via hardware buffers through libhybris" smoke — `weston-simple-egl`, `vkcube`, GTK3/4, Firefox, supertuxkart, plus `vulkaninfo`/`eglinfo` sanity. Skipped by the runner on x86 devices. |
-| `libhybris_zink` | `libhybris-zink` | Representative libhybris+Zink coverage: Vulkan still through libhybris, EGL renderer must be Zink rather than llvmpipe, GTK4 should land as AHB when a capable device exists. Currently hardware-blocked on our Vulkan 1.1 Adreno devices; see [libhybris-zink.md](libhybris-zink.md). Skipped by the runner on x86 devices. |
-| `gfxstream`     | `gfxstream` | Experimental bridge-backend coverage plus an `eglinfo` software-fallback guard. Vulkan-native `vkcube` works today on physical devices; GL/EGL app tests are gated on the remaining Zink-on-gfxstream work in [gfxstream-bridge.md](gfxstream-bridge.md). Surface ignored cases with `cargo test -- --ignored`. Skipped by the runner on emulator targets. |
-| `cpu_graphics`  | `cpu`       | Backend-agnostic SHM paths under software-only rendering: `weston-simple-shm`, GTK3 with `GDK_GL=disabled`, GTK4 with `GSK_RENDERER=cairo`, plus an `eglinfo` llvmpipe/swrast sanity. |
-| `xwayland`      | mixed       | Anything that drives the bionic-built Xwayland binary. Pure-X11 SHM smoke uses `cpu` and runs on x86; TAWC-DRI AHB round-trips and libhybris's X11 EGL plugin use `libhybris` and are skipped on x86 devices. |
-| `text_input`    | `cpu`       | wayland-debug-app text-input-v3, wl_keyboard, clipboard, and cursor-tap coverage. Buffer type is irrelevant. |
-| `touch_input`   | `cpu`       | wayland-debug-app wl_touch routing coverage, including subsurfaces and popups. Buffer type is irrelevant. |
-| `pointer_input` | `cpu`       | wayland-debug-app wl_pointer coverage: the mouse/touch source split, button codes, scroll direction and units, frames, focus targets, and the hover-exit-is-not-leave rule. Buffer type is irrelevant. |
-| `settings`      | `cpu`       | Runtime settings coverage: output scale, configure-state policy, and GTK3 broken menus workaround. |
-| `tawcroot`      | n/a         | tawcroot device-side smokes (wraps the cleat-driven suite). |
-| `uninstall_wipe` | n/a        | Wipe-engine edge cases against a *fabricated* KB-scale slot (mount gate, su-retry ladder). Rooted target only. |
+| Module           | Scope |
+|------------------|-------|
+| `ando`           | ando broker ([ando.md](ando.md)): Android commands from the guest, env hygiene, exit-code and signal forwarding, cwd and `-D` translation, option parsing, the disabled path, and disable tearing down in-flight children. |
+| `linker_config`  | The bionic linker config libhybris reads: `/linkerconfig` is no longer bind-mounted into the guest (its SELinux label granted `dir search` but not `dir getattr`, so an `ls` that statted every entry of `/` failed on it); the one file libhybris wants is copied to `/usr/lib/hybris-config/ld.config.txt` instead. |
+| `tawcroot`       | Wraps the cleat-driven tawcroot device suite (`tawcroot/test.sh --device --no-build`) as a single case so the run script stays the one command that exercises everything. |
+| `tawcroot_prodenv` | Production `libtawcroot.so` spawned through the exec broker's ARGV form, so guests run in the real production sandbox — app uid, `untrusted_app`, the zygote-installed seccomp filter. |
+| `uninstall_wipe` | Wipe-engine (`RootfsCleaner`) edge cases against fabricated KB-scale slots: the uniform mount gate and the one-`su`-retry ladder. The gate/retry case is Magisk-rooted-target only. |
 
 **Persistent-state policy.** Integration tests must not mutate state
 that outlives the test run: no real distro installs (nothing through
@@ -60,99 +51,15 @@ flips that broke the app for later tests when it died mid-run) and was
 deleted; accepted coverage gap, see
 [external-binds.md](external-binds.md) "Testing".
 
-The **backend pin** for each module is enforced at every spawn: tests
-in `libhybris::` call `RootfsProcess::spawn_with(GraphicsBackend::Libhybris, …)`
-(and the corresponding `launch_and_wait_for_*` / `assert_renders_via_*`
-variants), `libhybris_zink::` pins `LibhybrisZink`, `gfxstream::` pins
-`Gfxstream`, `cpu_graphics::` / `apps::` / `settings::` /
-`text_input::` / `touch_input::` / `pointer_input::` pin `Cpu`, and
-`xwayland::` uses
-`Cpu` for pure-X11 SHM plus `Libhybris` for AHB/EGL-on-X11. The
-broker carries the override through to `InstallationMethod.startInside`
-on every spawn (`GRAPHICS <key>` header on RUNINSIDE, see
-[exec-broker.md](exec-broker.md)) — the user's persisted
-`Settings.graphicsBackend` (the in-app Settings screen pick) is left
-untouched, so a single suite run exercises every backend without a
-global flip.
+A backend pin is still expressible per spawn: `adb::rootfs_run_with`
+takes a `GraphicsBackend` (`libhybris` / `turnip` / `none`) and the
+broker carries it through to `InstallationMethod.startInside` as a
+`GRAPHICS <key>` header on the RUNINSIDE form (see
+[exec-broker.md](exec-broker.md)). The surviving suites don't pin —
+they run under whatever `adb::rootfs_run` derives from the app's Vulkan
+pick — but the mechanism is there for a test that needs one backend.
 
-`scripts/run-integration-tests.sh` marks unsupported target/backend
-combinations ignored via conditional libtest attributes: active
-`gfxstream::` tests on emulator targets, and active libhybris-backed
-tests on x86 devices. Existing per-test `#[ignore]` markers still gate
-unfinished backend cases.
-
-**Where does this app go?** Apps that need both a launch smoke and a
-buffer-path assertion get two tests — one in `apps::` (just maps a
-window) and one in the matching deeper module. Real-toolkit AHB
-smokes (Firefox / GTK / STK) live in **both** `libhybris::` and
-`gfxstream::` so a regression in one backend doesn't accidentally
-hide behind the other; SHM smokes live only in `cpu_graphics::` (the
-compositor's SHM plumbing doesn't depend on the chroot's graphics
-env). Apps where buffer type is irrelevant (e.g. `lxterminal` driving
-text input) get a single `apps::` entry.
-
-## Debug App (`wayland-debug-app`)
-
-A small C program built against libwayland-client and Cairo that exposes
-a subcommand CLI and emits structured `TAWC_DEBUG:` lines for the test
-harness to parse. It is cross-built on the host against
-`build/sysroots/<distro>-<abi>/`.
-
-### Output Protocol
-
-Every test-relevant line is prefixed `TAWC_DEBUG:` to filter from client
-and Wayland noise:
-```
-TAWC_DEBUG:READY                    Window mapped and initialized
-TAWC_DEBUG:TEXT_CHANGED:<text>      Full buffer contents after change
-TAWC_DEBUG:CURSOR_POS:<offset>      Cursor position (character offset)
-TAWC_DEBUG:PREEDIT:<text>           Current composing/preedit string
-TAWC_DEBUG:KEY:<name>               Keyboard event observed by the client
-TAWC_DEBUG:TOUCH_DOWN:<id>:<x>:<y>:<active>
-TAWC_DEBUG:POINTER_ENTER:<target>:<x>:<y>     Also POINTER_MOTION, POINTER_LEAVE
-TAWC_DEBUG:POINTER_BUTTON:<target>:<code>:<state>
-TAWC_DEBUG:POINTER_AXIS:<v|h>:<value>         Also POINTER_AXIS_V120, _STOP
-TAWC_DEBUG:POINTER_AXIS_SOURCE:<enum>
-TAWC_DEBUG:POINTER_FRAME
-```
-
-The client binds `wl_seat` at version 9, so `wl_pointer` reaches
-`axis_value120` / `axis_relative_direction` and `wl_touch` reaches
-`shape` / `orientation`. Every listener slot must stay filled — libwayland
-dereferences missing ones.
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `text-input` | Opens a Wayland toplevel with text-input-v3 enabled |
-| `text-input-no-surrounding` | Text-input client that never sends surrounding text |
-| `touch` / `subsurface` / `popup` | Touch routing scenes |
-| `clipboard-copy` / `clipboard-copy-double` / `clipboard-paste` | Wayland/Android clipboard bridge probes (`-double` replays GTK3's set-twice-with-SAVE_TARGETS copy) |
-
-### Building
-
-```bash
-# Build all test clients without copying:
-make -C tests/apps ABI=aarch64 DISTRO=arch all
-```
-
-`scripts/run-integration-tests.sh` builds and deploys all integration
-clients before cargo starts, so the explicit build step is only needed
-for ad-hoc manual runs.
-
-### Running Manually
-
-```bash
-scripts/rootfs-run.sh '/usr/local/bin/wayland-debug-app text-input'
-```
-
-## Integration Tests
-
-Rust tests using `std::process::Command` to call adb. Zero external
-runtime dependencies on the host.
-
-### Running
+## Running
 
 `scripts/run-integration-tests.sh` is the recommended entry point. It
 picks the device via `scripts/lib/select-device.sh` (resolves
@@ -179,156 +86,72 @@ instead of attaching to the wrong target.
 Prerequisites: a phone (or emulator) connected via adb and an in-app
 distro installed (see [installation.md](installation.md)). The runner
 builds the APK, skips reinstalling it when the installed APK hash
-matches, installs missing rootfs runtime packages, incrementally
-cross-builds every test program from `tests/apps/<name>/` on the host,
-and deploys only changed executables into `/usr/local/bin/` inside the
-rootfs. The suite auto-targets the unique install if there's only one,
-otherwise pin via `TAWC_INSTALL_ID=<id>`. Some modules have additional
-prerequisites (e.g. libhybris on a real device for the GPU-rendering
-tests); see each module's docstring.
-`wayland-debug-app` is deliberately fail-fast test code: unsupported
-protocol state, missing globals, truncation, and internal invariant
-failures abort the process instead of being tolerated.
+matches, installs the guest packages the suite needs, and builds the
+tawcroot device tests + fixtures. The suite auto-targets the unique
+install if there's only one, otherwise pin via `TAWC_INSTALL_ID=<id>`.
 
-### Test Input Mechanism
+`uninstall_wipe::test_wipe_gate_and_su_retry` needs a Magisk-rooted
+target; the runner marks it ignored elsewhere via the conditional
+`tawc_skip_root_on_target` cfg it sets when `su -c 'id -u'` doesn't
+return 0. That is the only conditional-attribute cfg left — the
+compositor-era `tawc_skip_gfxstream_on_target` /
+`tawc_skip_libhybris_on_target` cfgs are gone with the backends.
 
-Tests inject input through Android-facing entry points. Soft-IME scenarios call
-methods on the active `TawcInputConnection` via broker `ic-*` actions. Hardware
-keyboard scenarios dispatch `KeyEvent`s through the focused Activity/view via
-`hardware-key`, matching Android's USB/Bluetooth keyboard path. There is
-intentionally no test path that pokes `NativeBridge.native*` directly — see
-`notes/text-input.md` "Test infrastructure note" for the rationale.
+## Key Modules
+
+- **`adb.rs`**: `shell`, `rootfs_host_exec` (run as the app uid/domain
+  through the broker), `rootfs_run` / `rootfs_run_with` (RUNINSIDE
+  form), `test_init`, `native_lib_dir`, and the per-distro ando test
+  override (`set_ando` / `get_ando`). Every app-facing call goes
+  through the shared broker client.
+- **`exec_broker.rs`**: the host driver for the exec broker. Picks a
+  free local TCP port, sets up `adb forward` to the device-side
+  `LocalServerSocket`, sends the protocol header, multiplexes local
+  stdio over the socket, and reports the child's exit code. Header
+  forms are ARGV (fork-exec), ACTION (in-process broker action), and
+  RUNINSIDE (into an install). Wire protocol:
+  [exec-broker.md](exec-broker.md).
+- **`helpers.rs`**: now only `test_init()` — the shared per-test reset
+  every test calls first.
+- **`tawcroot_prodenv.rs`**: stages the prod-env fixture rootfs into app
+  cache and runs production `libtawcroot.so` through the broker's ARGV
+  form (`env`, `run_guest`, `assert_guest_exit`, `app_sh`).
+- **`lib.rs`**: `install_id()` resolution (honours `TAWC_INSTALL_ID`,
+  else the unique `distros/*/metadata.json`), `TAWC_SCRATCH`, and the
+  `GraphicsBackend` enum.
+
+## Test reset
+
+Per-test isolation goes through the broker `test-init` action:
 
 ```bash
-# Per-test reset: in-memory factory settings, RecordingImeOutput,
-# active-IC cleanup, and Wayland client close requests.
 scripts/tawc-exec.sh --action test-init
-
-# Drive the IC: commit text, set preedit, send a key, etc.
-scripts/tawc-exec.sh --action ic-commit-text --arg text=hello
-scripts/tawc-exec.sh --action ic-set-composing-text --arg text=wor
-scripts/tawc-exec.sh --action ic-finish-composing
-scripts/tawc-exec.sh --action ic-send-key-event --arg keycode=67  # Backspace
-
-# Drive hardware-key dispatch through the focused view key path.
-scripts/tawc-exec.sh --action hardware-key --arg keycode=67
 ```
 
-Every call goes through the same Kotlin entry points Android uses to dispatch
-Gboard / OpenBoard / AOSP-latin or physical keyboard events. Tests assert
-Android contract results and `wayland-debug-app` observations, not private
-tawc Rust/Kotlin state.
+It enters in-memory factory settings (no `SharedPreferences` writes),
+finishes any lingering op-log screen a prior broker action left on top
+of the task, clears the per-distro ando overrides and reconciles the
+ando broker, and — when given an `installId` — kills that install's
+process tree via `ProcessScanner`. None of it survives app process
+death.
 
-Broker actions connect to an already-running `LocalServerSocket` and complete in <10ms each, vs. 100–300ms per `am broadcast` JVM cold start (the broadcast channel was retired entirely). More reliable than `adb shell input text` (which gets intercepted by the IME).
-
-### Architecture
-
-```
-Host (cargo test)                    Phone
-  │                                    │ (test programs already compiled
-  │                                    │  and deployed by the runner; the
-  │                                    │  harness only checks they exist)
-  ├─ broker RUNINSIDE (start client) ──┤──→ wayland-debug-app / stock apps / …
-  │     └─ piped stdout ←──────────────┤     └─ TAWC_DEBUG:READY (debug app only)
-  │                                    │
-  ├─ broker action ic-commit-text ─────┤──→ ExecBroker / InputActions
-  │                                    │     └─ TawcInputConnection.commitText
-  │                                    │       └─ nativeCommitText
-  │                                    │         └─ text_input_v3
-  │                                    │           └─ GTK text view
-  │     └─ TAWC_DEBUG:TEXT_CHANGED ←───┤
-  │                                    │
-  ├─ broker action inject-touch ───────┤──→ SurfaceView dispatch (MotionEvent)
-  │                                    │     └─ nativeOnTouchEvent
-  │                                    │       └─ wl_touch → GDK_TOUCH_BEGIN
-  │                                    │         └─ GtkGestureMultiPress
-  │                                    │           └─ cursor move
-  │     └─ TAWC_DEBUG:CURSOR_POS ←─────┤
-  │                                    │
-  ├─ broker action inject-pointer ─────┤──→ SurfaceView dispatch (SOURCE_MOUSE)
-  │                                    │     └─ nativeOnPointerEvent
-  │                                    │       └─ wl_pointer
-  │     └─ TAWC_DEBUG:POINTER_* ←──────┤
-  │                                    │
-  └─ assert text/cursor == expected    │
-```
-
-### Key Modules
-
-- **`adb.rs`**: Shell commands, chroot execution, broker-action-based test reset and input injection (`test_init`, `ic_commit_text`, …; routed through the shared broker client)
-- **`rootfs.rs`**: `ensure_wayland_debug_app` / `ensure_tawc_dri_test` /
-  `ensure_eglx11_test` — each one just probes for `/usr/local/bin/<name>`
-  inside the rootfs and returns its path. Tests do **not** compile
-  anything; package install, host builds, and changed-artifact deploys
-  happen up-front in `scripts/run-integration-tests.sh`.
-- **`debug_app.rs`**: Start/stop lifecycle, stdout reader thread, `wait_for()` with timeout
-- **`compositor.rs`**: Check whether the compositor is running (`is_running`,
-  `assert_running`) and query its state via the broker `query-state` action. The compositor itself
-  is launched by `run-integration-tests.sh` before `cargo test` runs — the
-  Rust harness never starts it, only asserts it's there.
-- **`helpers.rs`**: Shared test helpers. Every spawn helper takes an
-  explicit `GraphicsBackend` so the in-rootfs env is hermetic — the
-  user's UI pick never leaks in.
-  - `require_compositor`, `assert_compositor_clean`, `has_ahb_surface`,
-    `has_shm_surface`, `assert_client_animating` — observation primitives.
-  - `start_wayland_debug_text_input` and related Wayland debug app
-    launchers — for `text_input::` and `touch_input::`.
-  - `launch_and_wait_for_toplevel(backend, …)` — for `apps::`. Waits
-    until the client has committed its first frame regardless of
-    buffer type.
-  - `launch_and_wait_for_ahb(backend, …)` — for the per-backend
-    hardware-buffer tests that need to keep the process alive after
-    first paint (e.g. Firefox's steady-state surface-count check,
-    `vkcube`'s animating check). Returns the still-running
-    `RootfsProcess`.
-  - `assert_renders_via_shm(backend, cmd, name, timeout)` — one-call
-    SHM smoke: spawn, wait for SHM import, assert no AHB, assert ≥1
-    toplevel, stop cleanly, assert clean. The body of every
-    forced-SHM test reduces to this single call.
-  - `assert_renders_via_ahb(backend, cmd, name, timeout)` — same
-    shape for the AHB fast path. Bespoke tests that need extra
-    steady-state checks (Firefox, vkcube) keep using
-    `launch_and_wait_for_ahb` directly.
-
-  `require_compositor` panics with a clear message if the compositor
-  isn't running, telling the developer to use the run script instead
-  of invoking `cargo test` directly. The OnceLock state means
-  one-time setup checks run once per `cargo test` invocation.
+The broker actions the suite can use are `test-init`, `cleanup-rootfs`,
+`app-info`, `set-ando` / `get-ando`, and `install` / `uninstall`. The
+compositor-era input and settings actions (`ic-*`, `hardware-key`,
+`query-state`, `set-output-scale`, …) went with the display stack.
 
 ## Waits, not sleeps
 
-Tests and helpers key waits off `query-state` observables instead of
-fixed grace sleeps wherever a discrete signal exists (2026-07 pass;
-the old sleeps cost ~0.5–2 s per test and still raced):
+Where a discrete signal exists, tests poll it instead of sleeping a
+fixed grace. `ando::wait_for_proc` polls the Android process table
+until a child appears (or until the broker has reaped it), so the
+assertions don't race the broker's asynchronous cleanup.
 
-- "window actually on screen" → `wait_for_rendered_toplevels_at_least`
-  (`rendered_toplevels` counts toplevels in the last rendered frame).
-  Used by `launch_and_wait_for_toplevel` / `launch_and_wait_for_ahb`
-  after first commit.
-- "client committed again / still animating" → `wait_for_frames_advance`
-  (`frames` ticks on every client commit). `assert_client_animating`
-  passes as soon as the frames land; the window is a deadline, not a
-  fixed measurement cost. Firefox steady-state checks use the same
-  signal.
-- teardown → `wait_for_clean_state` polls clients/toplevels/surfaces
-  **and host counts** in one condition; host teardown goes through an
-  async Activity finish() round trip, so asserting `hosts == 0`
-  point-in-time after the surface wait was a real flake.
-- input readiness → `wait_for_active_input_connection` (broker
-  `input-ready`), not a launch-grace proxy.
-- IC state after client edits → the IC learns the client's cursor via
-  an async surrounding-text update; assertions about what the IC
-  accepts/rejects right after a text change must poll (see
-  `test_stale_newline_context_editing_paths`).
-- debug-app event order: within one text-input transaction the app
-  emits `PREEDIT` before `TEXT_CHANGED`, so "wait for preedit then
-  read last_text()" is a race — poll for the text condition itself.
-
-Sleeps that remain are deliberate: negative assertions ("nothing
-happens within N ms", e.g. Xwayland lazy-start), liveness soaks
-("still running 1 s after first paint"), IC-op pacing against real GTK
-entries with no per-op observable, and screencap settle before pixel
-sampling.
+Fixed sleeps that remain are deliberate: the ando signal/death cases
+sleep ~1 s so the child is genuinely up before it is killed, and the
+disable case sleeps 2 s to confirm the child survived session teardown
+*before* the disable under test — otherwise a later "gone" would be a
+false pass.
 
 ## Adding New Tests
 
@@ -336,17 +159,6 @@ Add to an existing `tests/<module>.rs` if it fits an existing group, or
 create a new module: drop `tests/<new>.rs` next to the others and add a
 `mod <new>;` line to `tests/integration.rs`. Tests pick up the module
 prefix automatically and the run script's substring filter just works.
-
-If a new compositor protocol is needed, extend `wayland-debug-app.c`:
-
-1. Add a new command (new function + entry in `commands[]`).
-2. Define protocol messages (`TAWC_DEBUG:YOUR_EVENT:value`) and a matching
-   parser in `debug_app.rs`.
-3. Use the same `DebugApp` harness (`start`, `wait_ready`, `wait_for`).
-
-Commands that rely on text input should emit `READY` only after the
-client has enabled `zwp_text_input_v3`; otherwise the harness can inject
-text before the compositor accepts it.
 
 ## Design Decisions
 
@@ -358,19 +170,12 @@ text before the compositor accepts it.
   produces when each `tests/*.rs` is its own target. `Cargo.toml` has
   `autotests = false` plus an explicit `[[test]]` entry so the
   per-group files aren't auto-discovered as separate binaries.
-- **C for debug app:** Host-side cross-builds are quick after the sysroot exists; no compiler or `base-devel` is needed in the device rootfs.
-- **Broker input actions over `adb shell input text`:** The system IME
-  can intercept `input text` key events and buffer/autocorrect them.
-  Broker actions drive `TawcInputConnection` for soft-IME input and
-  focused-view dispatch for hardware-key input, without starting
-  a broadcast JVM for every operation.
-- **Reader thread + mpsc channel:** adb stdout is a blocking stream.
-  Thread drains it continuously, mpsc gives timeout-based waiting.
-- **App-side reset owns guest cleanup:** Per-test isolation goes
-  through the broker `test-init` action. It resets in-memory settings,
-  input state, compositor clients, and runs `ProcessScanner` against the
-  target rootfs. `RootfsProcess` is only a broker-session convenience for
-  mid-test stdout/stderr and stop requests; it does not use host pidfiles,
-  `ps`, PGID reads, or host-side `kill`.
-- **`--test-threads=1`:** Tests share the phone and compositor and can't
-  run in parallel.
+- **Broker, not adb tricks:** The app process fork-execs host-driven
+  work itself, so children inherit the app's uid and `untrusted_app`
+  domain — the same sandbox production uses — and PDEATHSIG works. See
+  [exec-broker.md](exec-broker.md).
+- **App-side reset owns guest cleanup:** `test-init` resets in-memory
+  settings and (with an `installId`) sweeps the install's process tree.
+  It does not use host pidfiles, `ps`, PGID reads, or host-side `kill`.
+- **`--test-threads=1`:** Tests share the phone and the standing install
+  and can't run in parallel.

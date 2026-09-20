@@ -108,7 +108,10 @@ internal object RunCommandOp {
             }
 
             val proc: Process = try {
-                UserRootfsSession.startInside(app, method, rootfs, command)
+                // `null` = the configured backend. No compositor is
+                // started: a command the user typed in the container
+                // info screen is a shell command, not a GUI program.
+                method.startInside(rootfs, command, null)
             } catch (t: Throwable) {
                 val msg = if (cancelled.get()) {
                     app.getString(R.string.operation_status_cancelled)

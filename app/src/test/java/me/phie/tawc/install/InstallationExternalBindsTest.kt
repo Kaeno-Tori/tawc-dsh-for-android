@@ -125,13 +125,38 @@ class InstallationExternalBindsTest {
         // under the cap.
         assertEquals(common.size, common.map { it.guestPath }.toSet().size)
         assertTrue(common.size <= ExternalBind.MAX_BINDS)
-        // Android root and home. Only the browse-only root suggestion
-        // is read-only; the storage binds exist to be saved into.
-        assertTrue(common.any { it.hostPath == "/" && it.guestPath == "/android" && it.readOnly })
-        assertTrue(common.any { it.hostPath == "/storage/emulated/0" && it.guestPath == "/home/android" })
+        // Android root and the shared-storage mount. Only the browse-only
+        // root suggestion is read-only; the storage binds exist to be
+        // saved into.
+        // `_root` suffix is deliberate: a bare /android would read as "the
+        // Android side's storage", which is already /mnt/android.
+        assertTrue(common.any { it.hostPath == "/" && it.guestPath == "/android_root" && it.readOnly })
+        // Shared storage mounts at /mnt/android rather than under /home:
+        // the convention is "your own folders live in your home, the
+        // phone's storage is a mount", and the in-rootfs home is /root
+        // (RootfsEnv), so a /home/<name> guest path would name a user that
+        // doesn't exist. Asserted as the convention, not just the literal
+        // — the point of the change is that nothing lands in /home.
+        assertTrue(common.any { it.hostPath == "/storage/emulated/0" && it.guestPath == "/mnt/android" })
+        assertTrue(common.none { it.guestPath.startsWith("/home/") })
+        assertTrue(common.filter { it.hostPath != "/" }.all { it.guestPath.startsWith("/root/") || it.guestPath.startsWith("/mnt/") })
         assertTrue(common.filter { it.hostPath != "/" }.none { it.readOnly })
         // The two platform-specific renames in the XDG mapping.
         assertTrue(common.any { it.hostPath.endsWith("/Movies") && it.guestPath == "/root/Videos" })
         assertTrue(common.any { it.hostPath.endsWith("/Download") && it.guestPath == "/root/Downloads" })
+    }
+
+    @Test
+    fun sharedStorageBindsAreTheNarrowerAutomaticSet() {
+        val shared = AllFilesAccess.sharedStorageBinds("/storage/emulated/0")
+        // The automatic set must not carry the Android-root bind: the card
+        // that offers it only talks about shared storage.
+        assertTrue(shared.none { it.hostPath == "/" })
+        assertTrue(shared.none { it.readOnly })
+        assertTrue(shared.any { it.hostPath == "/storage/emulated/0" && it.guestPath == "/mnt/android" })
+        assertTrue(shared.none { it.guestPath.startsWith("/home/") })
+        assertTrue(shared.drop(1).all { it.guestPath.startsWith("/root/") })
+        // Everything in it is also in the suggested set.
+        assertTrue(AllFilesAccess.commonDirBinds("/storage/emulated/0").containsAll(shared))
     }
 }

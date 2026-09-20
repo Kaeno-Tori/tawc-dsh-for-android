@@ -36,7 +36,7 @@ data class Installation(
     /**
      * Stamp identifying the app version whose [tawcInstalls] entries
      * are currently materialised in the rootfs. Compared against
-     * `CompositorService.currentExtractStamp(context)` by
+     * `TawcAssets.currentExtractStamp(context)` by
      * [TawcInstaller.installInto] — when they diverge, the old entries
      * are wiped from the rootfs and replaced with a fresh install.
      *
@@ -65,14 +65,6 @@ data class Installation(
      */
     val externalBinds: List<ExternalBind> = emptyList(),
     /**
-     * Desktop-entry ids ([me.phie.tawc.launcher.LauncherEntry.id],
-     * filename minus `.desktop`) the user hid from the launcher list.
-     * Filtering happens Kotlin-side (see notes/launcher.md); the Rust
-     * scanner never sees hide state. Stale ids (app removed from the
-     * distro) are harmless — they never match — so nothing prunes them.
-     */
-    val hiddenDesktopIds: List<String> = emptyList(),
-    /**
      * Whether this install may use ando (notes/ando.md) — run Android
      * commands outside the Linux environment. Default `false`: opt-in,
      * fail-closed. Absent in legacy metadata parses as `false`, so
@@ -90,6 +82,18 @@ data class Installation(
      * leaning on the default forever.
      */
     val bootstrapFlavor: String = FLAVOR_TARBALL,
+    /**
+     * `content://` URI of the user-supplied pack this rootfs was
+     * extracted from, for installs that were imported rather than
+     * downloaded. Null for every ordinary install.
+     *
+     * Persisted so that "start over" after a failed import retries the
+     * *pack* instead of quietly reinstalling from the upstream mirror —
+     * which would look like a retry and behave like a different
+     * operation. The filename is recoverable from [sourceUrl]
+     * (`import:<name>`), so only the URI needs a field.
+     */
+    val packUri: String? = null,
 ) {
     fun rootfsDir(store: InstallationStore): File = store.rootfsDir(id)
     fun metadataFile(store: InstallationStore): File = store.metadataFile(id)
@@ -104,6 +108,7 @@ data class Installation(
         put("installedAtAppVersionCode", installedAtAppVersionCode)
         put("sourceUrl", sourceUrl)
         put("bootstrapFlavor", bootstrapFlavor)
+        if (packUri != null) put("packUri", packUri)
         put("state", state.name)
         if (failure != null) put("failure", failure)
         if (label != null) put("label", label)
@@ -116,25 +121,8 @@ data class Installation(
         if (externalBinds.isNotEmpty()) {
             put("externalBinds", ExternalBind.toJsonArray(externalBinds))
         }
-        if (hiddenDesktopIds.isNotEmpty()) {
-            put("hiddenDesktopIds", JSONArray(hiddenDesktopIds))
-        }
         if (andoEnabled) put("andoEnabled", true)
     }.toString(2)
-
-    /**
-     * Copy with [entryId] added to / removed from [hiddenDesktopIds].
-     * Idempotent both ways; the single mutation shape shared by the
-     * launcher UI and the `set-entry-hidden` broker action (always
-     * applied through [InstallationStore.update]).
-     */
-    fun withEntryHidden(entryId: String, hidden: Boolean): Installation = copy(
-        hiddenDesktopIds = if (hidden) {
-            if (entryId in hiddenDesktopIds) hiddenDesktopIds else hiddenDesktopIds + entryId
-        } else {
-            hiddenDesktopIds - entryId
-        }
-    )
 
     /**
      * Lifecycle of one installation slot. See `notes/installation.md`
@@ -271,15 +259,11 @@ data class Installation(
                 externalBinds = if (obj.has("externalBinds"))
                     ExternalBind.fromJsonArray(obj.getJSONArray("externalBinds"))
                 else emptyList(),
-                hiddenDesktopIds = if (obj.has("hiddenDesktopIds"))
-                    obj.getJSONArray("hiddenDesktopIds").let { arr ->
-                        buildList(arr.length()) {
-                            for (i in 0 until arr.length()) add(arr.getString(i))
-                        }
-                    }
-                else emptyList(),
                 andoEnabled = obj.optBoolean("andoEnabled", false),
                 bootstrapFlavor = obj.optString("bootstrapFlavor", FLAVOR_TARBALL),
+                // Absent for every record written before packs existed,
+                // and for every ordinary install since.
+                packUri = obj.optString("packUri", "").takeIf { it.isNotEmpty() },
             )
         }
 

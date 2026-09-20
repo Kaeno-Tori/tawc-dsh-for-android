@@ -5,8 +5,9 @@
 # Sources, all read from the working tree (no network):
 #   - LICENSE / LICENSE.MIT      tawc's own terms and the GPLv3 text
 #   - deps/**/{LICENSE,COPYING}* vendored native + Java source licenses
-#   - cargo metadata             compositor crates, texts from the
-#                                local ~/.cargo registry checkout
+#   - cargo metadata             Rust crates the APK links (andobridge,
+#                                plus its ando-broker path dep), texts
+#                                from the local ~/.cargo registry checkout
 #   - GRADLE_LICENSES below      curated map for Maven artifacts, whose
 #                                licenses live in POMs rather than files
 #   - licenses/                  texts with no in-tree source at all
@@ -36,7 +37,7 @@ export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 
 command -v cargo >/dev/null || { echo "ERROR: cargo not found" >&2; exit 1; }
-[ -d "$ROOT_DIR/deps/xwayland-src" ] || {
+[ -d "$ROOT_DIR/deps/libhybris" ] || {
     echo "ERROR: deps/ not populated; run scripts/ensure-deps.sh first" >&2
     exit 1
 }
@@ -50,10 +51,12 @@ mkdir -p "$(dirname "$GRADLE_LIST")"
 [ -s "$GRADLE_LIST" ] || { echo "ERROR: no Maven artifacts resolved" >&2; exit 1; }
 echo "    $(wc -l <"$GRADLE_LIST") artifacts"
 
-echo "=== Resolving compositor crates ==="
+echo "=== Resolving Rust crates ==="
 CARGO_META="$(mktemp)"
 trap 'rm -f "$CARGO_META"' EXIT
-cargo metadata --manifest-path "$ROOT_DIR/compositor/Cargo.toml" \
+# andobridge is the only Rust artifact the APK links; ando-broker comes
+# in as its path dep, so one manifest covers both.
+cargo metadata --manifest-path "$ROOT_DIR/andobridge/Cargo.toml" \
     --format-version 1 --filter-platform aarch64-linux-android >"$CARGO_META"
 
 echo "=== Writing $OUT ==="
@@ -67,25 +70,29 @@ import re
 ROOT = pathlib.Path(os.environ["ROOT_DIR"])
 OUT = pathlib.Path(os.environ["OUT"])
 
-SOURCE_URL = "https://github.com/wmww/tawc"
+# This fork's repository. It is what GPLv3 §6 asks the distributor of a
+# binary to offer — the source *of the work conveyed* — so the URL the
+# licenses screen prints has to point here, not at upstream: the upstream
+# tree does not contain this fork's changes (the DSH host layer, the UI,
+# the Vulkan provisioning, the renamed identity).
+SOURCE_URL = "https://github.com/Kaeno-Tori/tawc-dsh-for-android"
+
+# tawc itself, named for attribution rather than as the source of this
+# build. Most of the container layer (tawcroot, the ando broker, the
+# terminal integration, the libhybris plumbing) is its code.
+UPSTREAM_URL = "https://github.com/wmww/tawc"
 
 # Native/vendored components whose code, headers, or data end up in the
 # APK. Value is the checkout dir; license files are globbed out of it.
 NATIVE = {
     "libhybris (tawc fork)": "deps/libhybris",
-    "libxkbcommon": "deps/libxkbcommon",
-    "smithay (tawc fork)": "deps/smithay",
     "cleat": "deps/cleat",
     "termux-app (terminal-emulator, terminal-view, termux-shared extra-keys)": "deps/termux-app",
 }
-for d in sorted((ROOT / "deps/xwayland-src").iterdir()):
-    if d.is_dir():
-        NATIVE[d.name] = f"deps/xwayland-src/{d.name}"
 
 # Components with no license file in-tree. Text is taken from the named
 # sibling checkout, which carries an identical upstream license.
 CURATED_NATIVE = {
-    "libdrm": ("MIT", "deps/xwayland-src/libx11/COPYING"),
     "android-headers (Halium)": ("Apache-2.0", "deps/libhybris/LICENSE.Apache2"),
 }
 
@@ -367,13 +374,30 @@ if declared_only:
     )
 
 doc = {
+    # The intro is written for someone holding this app, not for someone who
+    # already knows tawc. Upstream's own wording opens with "tawc's own source
+    # code is MIT licensed" and never says what tawc is — in a fork, that
+    # reads as a stray name, and the app genuinely is a fork rather than a
+    # rebuild, so half its components (tawcroot, the ando broker, the terminal,
+    # the graphics plumbing) are tawc's. Say that first, then the split.
     "intro": [
+        "This app is a fork of tawc — Tess's Android Wayland Compositor, which "
+        "runs Linux programs on Android without root. The layer it builds on is "
+        "tawc's: tawcroot (its chroot emulation), the ando broker, the in-app "
+        "terminal, the graphics plumbing. The harness host on top of that layer "
+        "is this fork's.",
         "tawc's own source code is MIT licensed. The app also bundles the "
         "extra-keys widget from termux-shared, which is GPLv3-only, so the "
         "distributed app as a whole is conveyed under the GNU General Public "
         "License version 3.",
-        "Complete corresponding source for this build, and the source of every "
-        "component listed here, is available at:",
+        # The GPLv3 §6 offer has to name the source *of this build*, which is
+        # this fork. This used to print upstream's URL while calling it
+        # "tawc's source ... are at:" — a tree that does not contain the DSH
+        # host layer, the UI, the Vulkan provisioning or the renamed
+        # identity. See TAWC_DSH_DESIGN.md §13.
+        "Complete corresponding source for this build is at:",
+        f"tawc's own upstream tree, which most of the container layer comes "
+        f"from, is at {UPSTREAM_URL}.",
     ],
     "sourceUrl": SOURCE_URL,
     "sections": sections,

@@ -76,38 +76,39 @@ stops being dev-only. proot's parked issues are at the bottom of
 ### Every process inside the chroot runs as uid 0
 
 `ChrootMethod.startInside` does `chroot $rootfs … /bin/bash -l`
-(ChrootMethod.kt:67,69) without dropping privileges, so bash, weston,
-Firefox, GTK demos, anything launched via `rootfs-run` or any future
-in-app Wayland client launcher runs as root. Inertia, not a kernel
+(ChrootMethod.kt:67,69) without dropping privileges, so bash, anything
+launched via `rootfs-run`, or anything a future in-app program launcher
+starts runs as root. Inertia, not a kernel
 requirement — sshd / systemd-nspawn / podman all do "privileged
 setup, then `setuid()` to a regular user before exec'ing the
 workload."
 
-What's wrong with everything-as-root: lots of desktop software
-dislikes it (GNOME warnings, Firefox refuses to start as root,
-browser sandboxing reacts oddly, Electron flakiness); `/home/...`
-files end up root-owned (Firefox profile, dotfiles) and the ownership
+What's wrong with everything-as-root: lots of software dislikes it
+(tools that warn or refuse to run as root, sandboxing that reacts
+oddly); `/home/...`
+files end up root-owned (dotfiles, anything a program writes to
+`$HOME`) and the ownership
 is wrong when inspected via host `rootfs-run` or any future file
-sharing; less robust against buggy Wayland clients trashing
+sharing; less robust against a buggy program trashing
 `/etc`/`/usr`; mismatches the proot shape (proot lies via `-0` so
 processes "appear to be" uid 0 but on-disk owner is the app uid).
 
 The right model is two execution modes picked by the caller:
 **as-root** for one-time setup and `pacman` (which refuses non-root
 anyway), **as-user** for user-launched apps. A single regular user
-inside the rootfs (`useradd -m user`, uid 1000) suffices — the
-wayland socket is mode 0777, no remapping needed. Concrete changes:
+inside the rootfs (`useradd -m user`, uid 1000) suffices — no uid
+remapping needed. Concrete changes:
 a new `Distro.createUser` step (`useradd -m -s /bin/bash user`,
 optional `/etc/sudoers.d/wheel`); `InstallationMethod.runInside`
 grows an `asUser: Boolean` (chroot side appends
 `setpriv --reuid=1000 --regid=1000 --clear-groups --` to the chroot
 exec); proot mirrors with `setpriv` (or accepts that proot already
-lies enough that uid doesn't matter — TBD); Wayland client launches
-pass `asUser=true`; `ArchPacmanCommon.installBasePackages` keeps
+lies enough that uid doesn't matter — TBD); in-app program launches
+pass `asUser=true`; `ArchPacmanCommon.installPackages` keeps
 `asUser=false`; `scripts/rootfs-run.sh` defaults to as-user with a
 `--root` opt-in. Existing installs keep working if `asUser` defaults
 to false on legacy installs without a `user` account; new installs
-get the user at install time. Optional one-shot upgrade at launcher
+get the user at install time. Optional one-shot upgrade at app
 startup (`useradd` if `/home/user` is missing). Out of scope:
 multi-user chroots, UID mapping, in-chroot sudo.
 

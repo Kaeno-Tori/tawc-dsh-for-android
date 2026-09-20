@@ -60,7 +60,13 @@ class ChrootMethod(context: Context) : InstallationMethod {
         val andoHostDir = store.andoHostDir(rootfs)
         val script = buildString {
             appendLine("set -eu")
-            appendLine(ChrootMounter.mountScript(rootfs, appPaths.shareDir.absolutePath, andoHostDir))
+            appendLine(
+                ChrootMounter.mountScript(
+                    rootfs,
+                    appPaths.shareDir.absolutePath,
+                    andoHostDir,
+                )
+            )
             // Quote rootfs and (if present) the user command into the
             // script. Both go through Sh.quote so paths with quotes
             // can't break out. The in-rootfs bash starts under
@@ -69,7 +75,7 @@ class ChrootMethod(context: Context) : InstallationMethod {
             // [RootfsEnv]'s map, with PATH/locale further refined by
             // the distro's /etc/profile.
             val rootfsQ = Sh.quote(rootfs)
-            val envArgvQ = RootfsEnv.envArgv(RootfsEnv.Method.CHROOT, graphics ?: Settings.graphicsBackend)
+            val envArgvQ = RootfsEnv.envArgv(RootfsEnv.Method.CHROOT, graphics ?: RootfsEnv.defaultBackend())
                 .joinToString(" ") { Sh.quote(it) }
             if (command != null) {
                 val cmdQ = Sh.quote(command)

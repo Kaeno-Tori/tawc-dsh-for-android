@@ -2,11 +2,12 @@
 
 ## Position
 
-tawc's own source is **MIT** (`LICENSE.MIT`). The **distributed APK is
+This fork's own source is **MIT** (`LICENSE.MIT`), as is tawc's — its
+upstream, which this app is built on. The **distributed APK is
 GPL-3.0-only** (`LICENSE`), because it links GPLv3 code. Both statements
 are true at once and neither replaces the other:
 
-- Anyone reusing tawc's *sources* gets them under MIT.
+- Anyone reusing this fork's *sources* gets them under MIT.
 - Anyone receiving a *built APK* receives it under GPLv3.
 
 `LICENSE` holds the GPLv3 text rather than the MIT text so GitHub's
@@ -38,10 +39,18 @@ libhybris ships a mixed license set (Apache-2.0, BSD variants, ISC, MIT,
 LGPLv2.1, GPL3). LGPLv2.1 §3 permits use under GPLv2-or-later, so it
 composes with GPLv3 here.
 
-Everything else that ships — 119 compositor crates, the Xwayland stack,
-121 Maven artifacts — is permissive (MIT/Apache-2.0/BSD/ISC/0BSD), plus
-one MPL-2.0 crate (`freedesktop-desktop-entry`, weak per-file copyleft,
-GPL-compatible) and FreeType under the FTL.
+Everything else that ships is permissive: the Rust crates the ando bridge
+links (MIT/Apache-2.0/Unlicense; one of them is also Unicode-3.0), 121
+Maven artifacts (Apache-2.0, BSD, ISC, plus Bouncy Castle's own licence),
+libhybris's mixed set, and the `cleat` and `termux-app` checkouts.
+
+What used to dominate that list was the display stack — ~119 compositor
+crates, the Xwayland stack, FreeType under the FTL, and the only MPL-2.0
+component (`freedesktop-desktop-entry`, weak per-file copyleft,
+GPL-compatible). All of it left with the compositor
+(TAWC_DSH_DESIGN.md §11). `licenses.json` is generated from what actually
+ships, so it no longer lists any of them; the numbers above are read off
+the current file.
 
 ## How the obligations are met
 

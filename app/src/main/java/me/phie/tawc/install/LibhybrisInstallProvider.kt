@@ -1,7 +1,6 @@
 package me.phie.tawc.install
 
 import android.content.Context
-import me.phie.tawc.compositor.CompositorService
 import java.io.File
 
 /**
@@ -60,16 +59,16 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
      *  libGL/libGLESv2 wrappers shadow any distro-shipped libs. */
     const val GUEST_GL_SHIMS_DIR = "$GUEST_LIB_DIR/gl-shims"
 
-    /** Vulkan-only LD_LIBRARY_PATH dir for the LibhybrisZink backend.
-     *  Holds a single `libvulkan.so.1` symlink into [GUEST_LIB_DIR];
-     *  `RootfsEnv` puts this dir (not [GUEST_LIB_DIR] itself) on
-     *  `LD_LIBRARY_PATH` so libhybris's libvulkan shadows the distro
-     *  Vulkan loader without also shadowing libhybris's libEGL /
-     *  libGLESv2 — those would dethrone distro Mesa (and therefore
-     *  Zink) on the libGL/libEGL/libGLES path that's the whole point
-     *  of this backend. libhybris's libvulkan finds its siblings via
-     *  the `RUNPATH=/usr/lib/hybris` libtool bakes in
-     *  (`scripts/build-libhybris.sh`), so the rest of the libhybris
+    /** Vulkan-only LD_LIBRARY_PATH shim dir — a leftover from the removed
+     *  `libhybris-zink` backend. Holds a single `libvulkan.so.1` symlink
+     *  into [GUEST_LIB_DIR]; that backend put this dir (not
+     *  [GUEST_LIB_DIR] itself) on `LD_LIBRARY_PATH` so libhybris's
+     *  libvulkan shadowed the distro Vulkan loader without also shadowing
+     *  libhybris's libEGL / libGLESv2, which would have dethroned distro
+     *  Mesa on the libGL/libEGL/libGLES path. Nothing sets that path any
+     *  more, but the symlink is still laid down; libhybris's libvulkan
+     *  finds its siblings via the `RUNPATH=/usr/lib/hybris` libtool bakes
+     *  in (`scripts/build-libhybris.sh`), so the rest of the libhybris
      *  tree being off the linker path doesn't matter. */
     const val GUEST_VULKAN_ONLY_DIR = "/usr/lib/hybris-vulkan-only"
 
@@ -90,7 +89,7 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
 """
 
     override fun entries(context: Context, methodKey: String): List<TawcInstall> {
-        if (!CompositorService.ensureLibhybrisExtracted(context)) return emptyList()
+        if (!TawcAssets.ensureLibhybrisExtracted(context)) return emptyList()
         // Asset tar's contents are now flat (libEGL.so, libhybris/,
         // gl-shims/, … at the tar root) so the extracted tree lives
         // directly at `<filesDir>/libhybris/`, not `<filesDir>/libhybris/lib/`.
@@ -130,9 +129,9 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
             type = TawcInstall.Type.COPY,
         )
 
-        // LibhybrisZink LD_LIBRARY_PATH shim: a Vulkan-only dir
-        // containing one symlink to libhybris's libvulkan.so.1. See
-        // [GUEST_VULKAN_ONLY_DIR] kdoc.
+        // Leftover from the removed libhybris-zink backend: a
+        // Vulkan-only dir containing one symlink to libhybris's
+        // libvulkan.so.1. See [GUEST_VULKAN_ONLY_DIR] kdoc.
         entries += TawcInstall(
             src = "$GUEST_LIB_DIR/libvulkan.so.1",
             dest = "$GUEST_VULKAN_ONLY_DIR/libvulkan.so.1",
@@ -144,7 +143,7 @@ internal object LibhybrisInstallProvider : TawcInstallProvider {
     /** Recursively walk [dir] and append a [TawcInstall] for each
      *  file / symlink, stripping [root] off the source path to
      *  compute the dest relative to [destBase]. Skips the
-     *  `.version` stamp written by [CompositorService.ensureLibhybrisExtracted]
+     *  `.version` stamp written by [TawcAssets.ensureLibhybrisExtracted]
      *  since it sits in the same dir as the asset contents and isn't
      *  part of the libhybris install. */
     private fun walk(

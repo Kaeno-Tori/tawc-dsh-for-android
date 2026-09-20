@@ -92,29 +92,58 @@ object AllFilesAccess {
 
     /**
      * The suggested bind set the manage-binds screen offers: the
-     * Android root at /android (much of it unreadable to the app uid —
-     * expected), shared storage as the Android home at /home/android,
-     * and the shared-storage folders with a standard name on both
-     * sides — Android's public directories mapped to the matching XDG
-     * user dir under the in-rootfs home (`/root`, see RootfsEnv).
-     * Movies maps to XDG's Videos; DCIM has no XDG name and keeps its
-     * own; XDG dirs with no Android equivalent (Desktop, Templates,
-     * Public) are omitted. Nothing is bound by default.
+     * Android root at /android_root (much of it unreadable to the app
+     * uid — expected) plus everything in [sharedStorageBinds]. Nothing
+     * is bound by default.
      *
-     * The root suggestion is browse-only (read-only): writes into the
-     * Android root are nonsensical and mostly uid-denied anyway. The
-     * shared-storage binds stay writable — they exist so Linux apps
-     * can save into Android storage. The user can flip either in the
-     * manage-binds UI.
+     * The convention the two halves express: **your own folders live in
+     * your home; the phone's storage is a mount.** That is why the
+     * per-directory binds sit under `/root` while the wholesale one does
+     * not — `/home/android` (the earlier default) read as "the home of a
+     * user named android", and the in-rootfs user is root, whose home is
+     * `/root`, so the path claimed something there was nobody to mean it
+     * about. `/mnt` is the conventional place for a filesystem that
+     * isn't yours and isn't removable media, and it already exists in
+     * the rootfs (unlike `/media`, which would have to be created).
+     *
+     * The root suggestion is browse-only (read-only) and named
+     * `_root` deliberately: bare `/android` reads as "the Android side's
+     * storage", which is what `/mnt/android` already is, while this is
+     * the whole Android filesystem. The shared-storage binds stay
+     * writable — they exist so Linux apps can save into Android storage.
+     * The user can flip either in the manage-binds UI.
+     */
+    fun commonDirBinds(
+        sharedStorage: String = Environment.getExternalStorageDirectory().absolutePath,
+    ): List<ExternalBind> = listOf(
+        ExternalBind(hostPath = "/", guestPath = "/android_root", readOnly = true),
+    ) + sharedStorageBinds(sharedStorage)
+
+    /**
+     * The shared-storage half of [commonDirBinds], and the set an install
+     * adds by itself when the user leaves "bind automatically" on
+     * ([me.phie.tawc.Settings.autoBindSharedStorage]).
+     *
+     * Android's public directories mapped to the matching XDG user dir
+     * under the in-rootfs home (`/root`, see RootfsEnv). Movies maps to
+     * XDG's Videos; DCIM has no XDG name and keeps its own; XDG dirs with
+     * no Android equivalent (Desktop, Templates, Public) are omitted.
+     *
+     * Deliberately **excludes the Android root**, so the automatic set is
+     * narrower than the suggested set. The screen offering the automatic
+     * option is the all-files-access card, whose own wording is about
+     * shared storage ("read your Downloads, Pictures, …"); handing over a
+     * read-only view of the entire Android filesystem as a side effect of
+     * that sentence would be a wider grant than the user was asked for.
+     * The root bind stays available as a one-tap suggestion.
      *
      * [sharedStorage] is injectable for unit tests, where
      * [Environment.getExternalStorageDirectory] is unavailable.
      */
-    fun commonDirBinds(
+    fun sharedStorageBinds(
         sharedStorage: String = Environment.getExternalStorageDirectory().absolutePath,
     ): List<ExternalBind> = buildList {
-        add(ExternalBind(hostPath = "/", guestPath = "/android", readOnly = true))
-        add(ExternalBind(hostPath = sharedStorage, guestPath = "/home/android"))
+        add(ExternalBind(hostPath = sharedStorage, guestPath = "/mnt/android"))
         for ((androidDir, guestName) in listOf(
             // Literal Environment.DIRECTORY_* values (non-final
             // statics, null in plain unit tests; the names are fixed

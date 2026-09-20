@@ -10,7 +10,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +20,7 @@ import kotlinx.coroutines.launch
 import me.phie.tawc.R
 import me.phie.tawc.ui.Scaffold
 import me.phie.tawc.ui.buildChildScreen
+import me.phie.tawc.ui.tawcSecondaryColor
 
 /**
  * Generic viewer for any [Operation] in [OperationsRegistry]. Looks up
@@ -98,9 +98,7 @@ class LogScreenActivity : AppCompatActivity() {
         scaffold = buildChildScreen(initialId)
         panel = OperationLogPanel(this)
         emptyView = TextView(this).apply {
-            setTextColor(
-                MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurfaceVariant)
-            )
+            setTextColor(tawcSecondaryColor())
         }
         scaffold.content.addView(panel.view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         scaffold.content.addView(emptyView, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -123,7 +121,7 @@ class LogScreenActivity : AppCompatActivity() {
                 .collect { op ->
                     if (op != null) {
                         everBound = true
-                        scaffold.toolbar.title = op.title
+                        scaffold.header.title = op.title
                         emptyView.visibility = View.GONE
                         panel.view.visibility = View.VISIBLE
                         panel.bind(op)
@@ -201,8 +199,6 @@ internal fun AppCompatActivity.confirmAndCancel(op: Operation) {
         .show()
     dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.tawc_danger))
     dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.let { btn ->
-        btn.setTextColor(
-            MaterialColors.getColor(btn, com.google.android.material.R.attr.colorOnSurfaceVariant)
-        )
+        btn.setTextColor(btn.tawcSecondaryColor())
     }
 }

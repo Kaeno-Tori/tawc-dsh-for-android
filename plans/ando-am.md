@@ -47,7 +47,7 @@ Why the broker and not the client or a new command:
 
 ## Components
 
-- **Broker hook** (`compositor/src/ando.rs`): after header parse, if
+- **Broker hook** (`ando-broker/src/ando.rs`): after header parse, if
   argv[0] == "am", call into Kotlin instead of spawning. The connection
   thread is a plain `std::thread`, so it must attach to the JVM
   (`JavaVM::attach_current_thread`; the VM handle is available at

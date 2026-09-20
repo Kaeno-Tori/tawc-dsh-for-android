@@ -42,9 +42,17 @@ internal class TerminalTabBar(context: Context) : LinearLayout(context) {
     private val strip: LinearLayout
     private var selectedIndex = -1
 
+    // The always-dark terminal palette, from `tawc_terminal_*` in
+    // values/colors.xml — those tokens are theme-invariant (see the
+    // comment there), so the bar looks the same in day and night.
+    private val barBg = context.getColor(R.color.tawc_terminal_bg)
+    private val tabBgSelected = context.getColor(R.color.tawc_terminal_tab_selected)
+    private val fgSelected = context.getColor(R.color.tawc_terminal_fg_selected)
+    private val fgUnselected = context.getColor(R.color.tawc_terminal_fg_unselected)
+
     init {
         orientation = HORIZONTAL
-        setBackgroundColor(BAR_BG)
+        setBackgroundColor(barBg)
 
         strip = LinearLayout(context).apply { orientation = HORIZONTAL }
         scroller = HorizontalScrollView(context).apply {
@@ -55,7 +63,7 @@ internal class TerminalTabBar(context: Context) : LinearLayout(context) {
 
         val newTab = ImageButton(context).apply {
             setImageResource(R.drawable.ic_add)
-            imageTintList = ColorStateList.valueOf(FG_UNSELECTED)
+            imageTintList = ColorStateList.valueOf(fgUnselected)
             setBackgroundColor(Color.TRANSPARENT)
             // ImageView's FIT_CENTER upscales the icon to the button
             // bounds; pad it back down to a small glyph.
@@ -85,11 +93,11 @@ internal class TerminalTabBar(context: Context) : LinearLayout(context) {
         for (i in 0 until strip.childCount) {
             val tab = strip.getChildAt(i) as LinearLayout
             val selected = i == index
-            tab.setBackgroundColor(if (selected) TAB_BG_SELECTED else Color.TRANSPARENT)
+            tab.setBackgroundColor(if (selected) tabBgSelected else Color.TRANSPARENT)
             (tab.getChildAt(0) as TextView)
-                .setTextColor(if (selected) FG_SELECTED else FG_UNSELECTED)
+                .setTextColor(if (selected) fgSelected else fgUnselected)
             (tab.getChildAt(1) as ImageView)
-                .imageTintList = ColorStateList.valueOf(if (selected) FG_SELECTED else FG_UNSELECTED)
+                .imageTintList = ColorStateList.valueOf(if (selected) fgSelected else fgUnselected)
         }
         strip.getChildAt(index)?.let { scrollIntoView(it) }
     }
@@ -111,12 +119,12 @@ internal class TerminalTabBar(context: Context) : LinearLayout(context) {
             ellipsize = TextUtils.TruncateAt.END
             maxWidth = dp(TAB_MAX_LABEL_DP)
             textSize = TAB_TEXT_SP
-            setTextColor(FG_UNSELECTED)
+            setTextColor(fgUnselected)
         }
         tab.addView(text, LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         val close = ImageButton(context).apply {
             setImageResource(R.drawable.ic_close)
-            imageTintList = ColorStateList.valueOf(FG_UNSELECTED)
+            imageTintList = ColorStateList.valueOf(fgUnselected)
             setBackgroundColor(Color.TRANSPARENT)
             setPadding(dp(ICON_PAD_DP), dp(ICON_PAD_DP), dp(ICON_PAD_DP), dp(ICON_PAD_DP))
             contentDescription = context.getString(R.string.terminal_close_tab)
@@ -138,10 +146,6 @@ internal class TerminalTabBar(context: Context) : LinearLayout(context) {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        val BAR_BG = Color.parseColor("#1A1A1A")
-        val TAB_BG_SELECTED = Color.parseColor("#404040")
-        val FG_SELECTED = Color.parseColor("#FFFFFF")
-        val FG_UNSELECTED = Color.parseColor("#9E9E9E")
         const val TAB_TEXT_SP = 13f
         const val TAB_MAX_LABEL_DP = 180
         const val TAB_PAD_H_DP = 12

@@ -36,6 +36,9 @@ import me.phie.tawc.install.distro.DistroRegistry
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.destructiveButton
 import me.phie.tawc.ui.tawcCard
+import me.phie.tawc.ui.tawcDivider
+import me.phie.tawc.ui.tawcSecondaryColor
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.verticalLp
 
 /**
@@ -53,14 +56,18 @@ class TaskManagerActivity : AppCompatActivity() {
     private val store by lazy { InstallationStore(this) }
     private lateinit var listContainer: LinearLayout
     private lateinit var emptyView: TextView
-    private val pad by lazy { (16 * resources.displayMetrics.density).toInt() }
-    private val cardMargin by lazy { (8 * resources.displayMetrics.density).toInt() }
-    private val cardPad by lazy { (12 * resources.displayMetrics.density).toInt() }
-    private val treeIndent by lazy { (18 * resources.displayMetrics.density).toInt() }
-    private val toggleSlotWidth by lazy { (32 * resources.displayMetrics.density).toInt() }
-    private val toggleIconSize by lazy { (28 * resources.displayMetrics.density).toInt() }
-    private val stopSlotWidth by lazy { (56 * resources.displayMetrics.density).toInt() }
-    private val spinnerSize by lazy { (28 * resources.displayMetrics.density).toInt() }
+    private val pad get() = resources.getDimensionPixelSize(R.dimen.tawc_page_padding)
+    private val cardMargin get() = resources.getDimensionPixelSize(R.dimen.tawc_card_gap)
+    private val cardPad get() = resources.getDimensionPixelSize(R.dimen.tawc_card_padding)
+    private val treeIndent get() = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
+    // Content-driven sizes rather than spacing rhythm, so they stay off the
+    // 4dp scale: the chevron's tap target (32x28) and the stop control's
+    // slot are sized around the glyph and the "Stopping" label, not around
+    // the layout grid.
+    private val toggleSlotWidth get() = (32 * resources.displayMetrics.density).toInt()
+    private val toggleIconSize get() = (28 * resources.displayMetrics.density).toInt()
+    private val stopSlotWidth get() = (56 * resources.displayMetrics.density).toInt()
+    private val spinnerSize get() = (28 * resources.displayMetrics.density).toInt()
 
     private var scope: CoroutineScope? = null
     private var refreshJob: Job? = null
@@ -87,8 +94,8 @@ class TaskManagerActivity : AppCompatActivity() {
         // during the first scan; flipped to GONE if results arrive.
         emptyView = TextView(this).apply {
             text = getString(R.string.task_manager_empty)
-            alpha = 0.6f
-            textSize = 16f
+            tawcText(R.style.TextAppearance_Tawc_BodyLarge)
+            setTextColor(context.tawcSecondaryColor())
             gravity = Gravity.CENTER
             setPadding(pad, pad * 4, pad, pad)
         }
@@ -174,26 +181,36 @@ class TaskManagerActivity : AppCompatActivity() {
     private fun installLabel(inst: Installation): String =
         DistroRegistry.displayLabel(inst)
 
+    /**
+     * One install's process tree, in DSH's list shape: a section heading at
+     * 14dp closed by a hairline, then a hairline under every row. The
+     * separators carry the grouping — DSH has no card around a list.
+     */
     private fun buildGroupCard(
         title: String,
         procs: List<ProcessInfo>,
         install: Installation? = null,
     ): View {
-        val card = tawcCard()
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(cardPad, cardPad, cardPad, cardPad)
+            setPadding(0, cardPad, 0, cardPad)
         }
-        column.addView(TextView(this).apply {
-            text = title
-            textSize = 16f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-        })
+        column.addView(
+            TextView(this).apply {
+                text = title
+                tawcText(R.style.TextAppearance_Tawc_BodyStrong)
+                setTextColor(getColor(R.color.tawc_label_primary))
+                setPadding(0, 0, 0, resources.getDimensionPixelSize(R.dimen.tawc_space_s))
+            },
+            verticalLp(MATCH_PARENT, WRAP_CONTENT),
+        )
+        column.addView(tawcDivider())
         for (row in processTreeRows(procs)) {
             column.addView(
                 buildProcessRow(row),
                 verticalLp(MATCH_PARENT, WRAP_CONTENT),
             )
+            column.addView(tawcDivider())
         }
         if (install != null) {
             column.addView(
@@ -204,8 +221,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 },
             )
         }
-        card.addView(column)
-        return card
+        return column
     }
 
     private fun buildProcessRow(treeRow: ProcessTreeRow): View {
@@ -213,7 +229,7 @@ class TaskManagerActivity : AppCompatActivity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, cardPad / 4, 0, cardPad / 4)
+            setPadding(0, resources.getDimensionPixelSize(R.dimen.tawc_space_s), 0, resources.getDimensionPixelSize(R.dimen.tawc_space_s))
             isClickable = true
             isFocusable = true
             val attrs = intArrayOf(android.R.attr.selectableItemBackground)
@@ -261,7 +277,7 @@ class TaskManagerActivity : AppCompatActivity() {
             toggle,
             LinearLayout.LayoutParams(toggleSlotWidth, toggleIconSize).apply {
                 marginStart = treeIndent * treeRow.depth
-                marginEnd = cardPad / 2
+                marginEnd = resources.getDimensionPixelSize(R.dimen.tawc_space_s)
             },
         )
 
@@ -271,7 +287,7 @@ class TaskManagerActivity : AppCompatActivity() {
         labelColumn.addView(
             TextView(this@TaskManagerActivity).apply {
                 text = p.displayCommand.ifBlank { getString(R.string.task_manager_unknown_command) }
-                textSize = 16.5f
+                tawcText(R.style.TextAppearance_Tawc_BodyLarge)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
@@ -299,12 +315,12 @@ class TaskManagerActivity : AppCompatActivity() {
         }
         details.addView(TextView(this).apply {
             text = p.displayCommand.ifBlank { getString(R.string.task_manager_process_title, p.pid) }
-            textSize = 28f
+            tawcText(R.style.TextAppearance_Tawc_Metric)
         }, verticalLp(MATCH_PARENT, WRAP_CONTENT, cardPad))
         for ((label, value) in detailRows(p)) {
             details.addView(
                 buildDetailRow(label, value),
-                verticalLp(MATCH_PARENT, WRAP_CONTENT, cardPad / 2),
+                verticalLp(MATCH_PARENT, WRAP_CONTENT, resources.getDimensionPixelSize(R.dimen.tawc_space_s)),
             )
         }
 
@@ -327,7 +343,7 @@ class TaskManagerActivity : AppCompatActivity() {
         )
 
         val card = tawcCard().apply {
-            radius = 28f * resources.displayMetrics.density
+            radius = resources.getDimension(R.dimen.tawc_radius_dialog)
             addView(details)
         }
         dialog.setContentView(card)
@@ -393,13 +409,12 @@ class TaskManagerActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             addView(TextView(this@TaskManagerActivity).apply {
                 text = label
-                textSize = 12f
-                alpha = 0.65f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                tawcText(R.style.TextAppearance_Tawc_CaptionStrong)
+                setTextColor(context.tawcSecondaryColor())
             })
             addView(TextView(this@TaskManagerActivity).apply {
                 text = value.ifBlank { getString(R.string.task_manager_unknown) }
-                textSize = 14f
+                tawcText(R.style.TextAppearance_Tawc_Body)
                 setTextIsSelectable(true)
             })
         }
@@ -435,7 +450,7 @@ class TaskManagerActivity : AppCompatActivity() {
                 minimumHeight = 0
                 insetTop = 0
                 insetBottom = 0
-                setPadding(cardPad / 2, cardPad / 3, cardPad / 2, cardPad / 3)
+                setPadding(resources.getDimensionPixelSize(R.dimen.tawc_space_s), cardPad / 3, resources.getDimensionPixelSize(R.dimen.tawc_space_s), cardPad / 3)
             }
         }
         return FrameLayout(this).apply {

@@ -7,7 +7,7 @@ call for not blocking app launch, and the mismatched `tawcStamp`
 means it retries on the next start — but if a rootfs fails to refresh
 *persistently* (permissions, disk full, half-deleted tree), the user
 gets no indication at all. The rootfs keeps running with stale
-tawc-shipped files (old libhybris/mesa-zink/gfxstream/ando/bashrc)
+tawc-shipped files (old libhybris/turnip/ando/bashrc)
 that silently diverge from the installed app version; the only
 evidence is logcat.
 

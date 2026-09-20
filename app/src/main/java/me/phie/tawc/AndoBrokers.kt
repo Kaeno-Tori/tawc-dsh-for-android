@@ -2,7 +2,7 @@ package me.phie.tawc
 
 import android.content.Context
 import android.util.Log
-import me.phie.tawc.compositor.NativeBridge
+import me.phie.tawc.ando.NativeAndoBridge
 import me.phie.tawc.install.InstallationStore
 
 /**
@@ -10,7 +10,7 @@ import me.phie.tawc.install.InstallationStore
  * per-distro capability: there is one broker listener per ando-enabled
  * install, each on that install's own socket. [refresh] recomputes the
  * enabled set from disk (honoring the test-mode override) and hands it
- * to [NativeBridge.nativeSyncAndoBrokers], which starts missing
+ * to [NativeAndoBridge.nativeSyncAndoBrokers], which starts missing
  * listeners and stops removed ones.
  *
  * Called from:
@@ -20,8 +20,10 @@ import me.phie.tawc.install.InstallationStore
  *  - the ando toggle commit paths (install form, distro settings, and
  *    the `set-ando` test action).
  *
- * Touches [NativeBridge] (which lazily `System.loadLibrary`s the large
- * compositor `.so`) and does disk IO, so call it off the main thread.
+ * Touches [NativeAndoBridge], which loads `libandobridge.so` — a
+ * library of its own, so app startup never drags in unrelated native
+ * code just to start ando listeners. Also does
+ * disk IO, so call it off the main thread.
  */
 object AndoBrokers {
     private const val TAG = "tawc"
@@ -60,7 +62,7 @@ object AndoBrokers {
             paths.add(store.andoSocket(inst.id).absolutePath)
         }
         try {
-            NativeBridge.nativeSyncAndoBrokers(ids.toTypedArray(), paths.toTypedArray())
+            NativeAndoBridge.nativeSyncAndoBrokers(ids.toTypedArray(), paths.toTypedArray())
         } catch (t: Throwable) {
             Log.w(TAG, "ando broker sync failed", t)
         }

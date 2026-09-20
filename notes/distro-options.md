@@ -5,57 +5,32 @@ Companion to [distro-abstraction.md](distro-abstraction.md), which
 documents the code-level abstraction that lets us add new families.
 
 We currently ship **Arch Linux ARM** (aarch64), **Arch Linux**
-(x86_64, for the emulator), **Manjaro ARM** (aarch64), **Void
-Linux** glibc (x86_64 and aarch64), and **Debian sid** (x86_64 and
-aarch64). This note exists because ALARM is
+(x86_64, for the emulator), and **Debian sid** (x86_64 and aarch64).
+This note exists because ALARM is
 under-maintained and somewhat bloated for our needs, and we keep
 getting asked "what about $distro?".
 
 ## Which distros are supported
 
-Only two, for users:
+Every shipped distro is user-supported:
 
 - **Arch Linux ARM** (aarch64)
-- **Debian sid** (aarch64, and x86_64 for the emulator)
+- **Arch Linux (x86)** (x86_64, for the emulator)
+- **Debian sid** (x86_64 and aarch64)
 
-Everything else — Manjaro ARM, Void Linux, and Arch Linux x86_64 —
-still ships in every build (release included) but is dev /
-experimental: less tested, and free to break. Arch Linux x86_64 is
-flagged supported in the code purely because it is the emulator's
-stand-in for ALARM (there is no aarch64 emulator path), so the
-emulator dev loop mirrors the phone's default; no user runs an
-x86_64 Android device.
+The install form lists every `DistroRegistry.all` entry directly. There
+is no dev/experimental tier and no "Other distros" expander: the
+`Distro.supported` flag still exists on the interface, but every shipped
+implementation sets it true, and the install pipeline treats all distros
+identically.
 
-Mechanically this is the `Distro.supported` flag, surfaced only in
-the UI: the install form lists supported distros directly and hides
-the rest behind an "Other distros" expander (see
-[distro-abstraction.md](distro-abstraction.md) → *Supported vs
-other*). The install pipeline itself treats all distros identically.
+Arch Linux x86_64 is the emulator's stand-in for ALARM (there is no
+aarch64 emulator path), so the emulator dev loop mirrors the phone's
+default; no user runs an x86_64 Android device.
 
-Practical consequence: new work — testing, GPU/browser bring-up,
-issue triage — targets ALARM and Debian sid first. A bug that only
-reproduces on Void or Manjaro is not release-blocking.
-
-**Manjaro ARM** is the most recent addition — also pacman-based, so
-it reuses ~all of `ArchPacmanCommon` (mirrorlist + keyring set are
-the only real differences). Bootstrap is the official
-[manjaro-arm/rootfs](https://github.com/manjaro-arm/rootfs/releases)
-weekly auto-build (~210 MB, much smaller than ALARM); the GitHub
-Releases REST API exposes a server-computed SHA-256 in the asset's
-`digest` field, which we fetch over HTTPS and verify against — see
-[installation.md](installation.md) → *Bootstrap integrity*. The
-rootfs is unusually clean (~93 packages: no kernel, no firmware, no
-editors, no openssh) so the post-extract cruft purge has nothing to
-strip on this distro.
-
-A Manjaro **x86_64** equivalent is not currently shipped: Manjaro
-publishes no clean rootfs tarball for amd64 (only ISO images and
-Docker layers via `manjarolinux/base:latest` on Docker Hub). Adding
-it would mean a small Docker Registry HTTP API client in the
-installer (token + manifest list + content-addressed blob fetch) —
-left out for now since x86_64 is the emulator-only path and Arch
-Linux x86_64 already covers regression testing of the install
-abstraction.
+Practical consequence: new work — testing and GPU bring-up, issue
+triage — targets ALARM and Debian sid first, with Arch Linux x86_64
+covering the emulator.
 
 The old integrity argument for replacing ALARM is gone: upstream now
 publishes a detached PGP signature for the bootstrap tarball, and we
@@ -87,20 +62,19 @@ toolchain for that.
 ## Viable shortlist
 
 Criteria: glibc, well-maintained on aarch64 + x86_64, small base
-suitable for a chroot, fresh-enough packages for a desktop browser.
+suitable for a chroot, fresh-enough packages.
 
 ### Debian
 
 - arm64 is a **first-class release architecture**, not a port.
 - `debootstrap --variant=minbase` produces a ~120-150 MB rootfs.
 - `apt` is boring and reliable; conservative versions on stable.
-- Fresh apps via `testing` or `sid` overlays, or the Mozilla repo for
-  Firefox specifically.
+- Fresh apps via `testing` or `sid` overlays.
 - x86_64 path is identical tooling — same `debootstrap`, same repos.
 - Largest package selection of any candidate.
-- Downside: stable's packages are old by design. For a Wayland
-  compositor target this is mostly fine; for Firefox you'll want
-  `testing` or upstream.
+- Downside: stable's packages are old by design. For a headless
+  chroot this is mostly fine; for fresh versions you'll want `testing`
+  or upstream.
 - **Currently shipped as sid** for the rolling/fresh package path.
   Bootstrap comes from Debian's official debuerreotype Docker
   artifacts (`dist-amd64` / `dist-arm64v8` branches), resolving the
@@ -108,40 +82,6 @@ suitable for a chroot, fresh-enough packages for a desktop browser.
   downloaded tarball with SHA-256. The apt-family code is suite-driven,
   so adding `testing`, `stable`, or Ubuntu-style variants should mostly
   be a data-object addition.
-
-### Void Linux (glibc flavor)
-
-- Rolling release, runit init (irrelevant in a chroot), `xbps` package
-  manager — fast and pleasant.
-- Official aarch64 + x86_64 prebuilt rootfs tarballs
-  (`void-<arch>-ROOTFS-*.tar.xz`), ~80 MB uncompressed — **smaller
-  than Debian minbase**.
-- Independent (not a Debian/Arch derivative), well-maintained but
-  smaller community.
-- Best pick if "minimal + rolling" is the goal.
-- **Currently shipped** (see top of this note +
-  `install/distro/voidlinux/`).
-- Bootstrap integrity: SHA-256 from upstream `sha256sum.txt`, whose
-  minisign (Ed25519) signature we verify against a per-image-date
-  release key published in void-packages on GitHub — a second origin,
-  so this is stronger than the single-HTTPS-endpoint profile the other
-  `Sha256` distros have. See notes/installation.md "Bootstrap
-  integrity".
-- Downside: smaller package repo than Debian/Arch. Things like Firefox,
-  GTK, weston are fine; long-tail desktop apps less so.
-
-### Manjaro ARM
-
-- Arch derivative but with **separately maintained ARM packages** —
-  notably better aarch64 upkeep than ALARM proper.
-- Rolling release, `pacman` (so most of our existing
-  `ArchPacmanCommon.kt` would carry over).
-- Active community focused on SBCs / PinePhone.
-- Best pick if "I like Arch but want better ARM maintenance" is the
-  goal — minimal porting effort given our current code.
-- **Currently shipped** (see top of this note + `install/distro/manjaro/ManjaroArm.kt`).
-- Downside: still a smaller team than Debian/Fedora; quality is good
-  but not enterprise-grade.
 
 ### Fedora
 
@@ -163,14 +103,11 @@ suitable for a chroot, fresh-enough packages for a desktop browser.
 | Goal                              | Pick           |
 | --------------------------------- | -------------- |
 | Safe default, biggest repo        | Debian         |
-| Minimal + rolling                 | Void glibc     |
-| Stay in pacman-land, better ARM   | Manjaro ARM    |
 | Fresh + heavy + enterprise feel   | Fedora         |
 
-Recommended stable-style option: **Debian stable**, with `testing` or
-upstream Mozilla repo for Firefox. Boring, correct, biggest community
-on arm64. For rolling/fresh packages, use the shipped **Debian sid** or
-Void glibc.
+Recommended stable-style option: **Debian stable**. Boring, correct,
+biggest community
+on arm64. For rolling/fresh packages, use the shipped **Debian sid**.
 
 ## Other options (and why they're worse)
 
@@ -183,10 +120,10 @@ Technically viable, practically a worse Debian for this:
 - Larger and more opinionated base (snapd hooks, netplan, cloud-init
   bits, ESM/livepatch noise in apt config). You'd spend time stripping
   it down to match a Debian minbase.
-- **Snap is hostile to chroots.** Default-repo Firefox is a snap and
-  needs systemd + snapd + loop mounts. You end up using the Mozilla
-  PPA or Debian's `.deb` — at which point you're using Debian with
-  extra friction.
+- **Snap is hostile to chroots.** Default-repo packages that are
+  snaps need systemd + snapd + loop mounts. You end up installing
+  the upstream `.deb` or a PPA — at which point you're using Debian
+  with extra friction.
 - None of Ubuntu's value-adds (HWE kernels, cloud images, LTS support,
   Pro) apply to us.
 
@@ -195,8 +132,8 @@ Technically viable, practically a worse Debian for this:
 All Ubuntu derivatives, all effectively **x86_64 only**. System76 has
 talked about COSMIC-on-ARM and there were experimental Pi images, but
 no official Pop!_OS arm64 release. The desktop-derivative distros'
-value is their DE/UX preselection, which is irrelevant when we're
-running our own compositor.
+value is their DE/UX preselection, which is irrelevant when we don't
+run a desktop environment at all.
 
 ### EndeavourOS / Garuda / CachyOS
 
@@ -205,7 +142,8 @@ Arch derivatives, x86_64 only. EndeavourOS ARM was discontinued.
 ### RHEL / Rocky / AlmaLinux / CentOS Stream
 
 Enterprise aarch64, rock-solid, but old packages and you fight EPEL/
-Flatpak to get a modern Firefox. Not a desktop-app target.
+Flatpak to get anything modern. Not a target for a headless
+container.
 
 ### Gentoo
 
@@ -231,8 +169,8 @@ glue we'd just have to disable.
   point.
 - Could in principle be the emulator-only chroot (libhybris is disabled
   there), but maintaining two toolchains for that isn't worth it.
-- postmarketOS proves Alpine works fine for desktop Wayland in
-  general; the issue is purely libhybris.
+- postmarketOS proves Alpine works fine as a general Linux userspace;
+  the issue is purely libhybris.
 
 ### Termux
 
@@ -292,11 +230,10 @@ to rely on. Mentioned only because people ask.
 
 For a glibc chroot on Android:
 
-- **Debian sid is now shipped** for rolling/fresh packages with apt.
-- **Default stable-style Debian** remains the conservative future pick.
-- **Void glibc** if you want minimal + rolling.
-- **Manjaro ARM** if you want to keep `pacman` and reuse most of the
-  current Arch code.
+- **Currently shipped:** Arch Linux ARM, Arch Linux (x86) and Debian
+  sid (both arches) — see `DistroRegistry.all`.
+- **Debian sid** is the rolling/fresh apt option; **Debian stable**
+  remains the conservative future pick.
 - Anything musl-based (Alpine, Chimera, Void-musl) is blocked on
   libhybris.
 - Anything bionic-based (Termux, Halium-style) is a different

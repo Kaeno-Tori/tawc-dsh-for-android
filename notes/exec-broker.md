@@ -13,11 +13,12 @@ the host) is the ando broker — see [ando.md](ando.md).
 Without the broker, host-side test/dev scripts had two ways to enter the
 app's environment:
 
-1. `adb shell run-as me.phie.tawc <cmd>` — works on debug builds but
-   transitions into the `runas_app` SELinux domain, which is **not** the
-   domain the running app actually uses (`untrusted_app`). Subtle policy
-   differences between the two have bitten us before (e.g. the missing
-   `system_file:execmod` on `runas_app` we worked around for libhybris;
+1. `adb shell run-as io.github.kaeno_tori.tawc_dsh <cmd>` — works on debug
+   builds but transitions into the `runas_app` SELinux domain, which
+   is **not** the domain the running app actually uses
+   (`untrusted_app`). Subtle policy differences between the two have
+   bitten us before (e.g. the missing `system_file:execmod` on
+   `runas_app` we worked around for libhybris;
    see `notes/proot.md`). PDEATHSIG also doesn't fire across the
    `shell → runas_app` transition, so killing the host script orphans
    any guest processes — fixed by routing through this broker.
@@ -40,7 +41,7 @@ host                                        device (app process)
 | stdio relay  |       ↔ TCP loopback       | accept loop           |
 +--------------+                            |   ↓                   |
        ↑                                    | per-connection thread |
-       │                                    |   ↓ ProcessBuilder    |
+       │                                    |   ↓ spawn             |
    user shell,                              | child (any cmd, runs  |
    test scripts                             | in untrusted_app)     |
                                             +-----------------------+
@@ -50,8 +51,10 @@ The host helper (`tawc-exec`) opens an `adb forward` to the device-side
 `LocalServerSocket`, sends a small header describing argv/env/cwd,
 multiplexes local stdio over the connection in framed binary form, and
 exits with the child's exit code. The device-side accept loop spawns
-the child via `ProcessBuilder` with stdio piped, runs three relay
-threads, and closes the socket when the child exits.
+the child — `ProcessBuilder` on the ARGV path,
+`InstallationMethod.startInside` on the RUNINSIDE path — with stdio
+piped, runs three relay threads, and closes the socket when the child
+exits.
 
 ## Wire protocol
 
@@ -114,15 +117,17 @@ false) sets the initial per-distro ando enablement — see notes/ando.md.
 **RUNINSIDE form** — run a command inside an installed chroot. The
 broker reads the install's recorded method from `metadata.json` and
 calls `InstallationMethod.startInside`, the single Kotlin entry point
-for "enter the chroot" (notes/rootfs-sessions.md). Used by
+for "enter the chroot" (notes/rootfs-sessions.md); it starts no
+session wrapper and waits for no Wayland socket. Used by
 `rootfs-run.sh`, `run-integration-tests.sh`, and the integration
 test crate. Omit `CMD` for interactive `bash -l`. `OP_TITLE` is
 optional and behaves the same as on ARGV form. `GRAPHICS` is
 optional and overrides the in-rootfs `GraphicsBackend` for this one
-spawn (libhybris / gfxstream / cpu); without it `Settings.graphicsBackend`
-(the user's UI pick) is used. Integration tests pin a backend per
-spawn here so the suite exercises every backend without flipping the
-persisted pref.
+spawn (libhybris / turnip / cpu); without it `RootfsEnv.defaultBackend()`
+is used, which derives the backend from the Vulkan pick in Settings
+(TAWC_DSH_DESIGN.md §11.4). This header is the only remaining way to
+pin a backend by hand; the host helper exposes it as `--graphics`
+(`adb::rootfs_run_with`).
 
 ```
 TAWCEXEC 1
@@ -153,11 +158,13 @@ OP_TITLE arch: pacman -Syu
   via `bash -lc <command>` inside the rootfs. Omit for interactive
   `bash -l`.
 - `GRAPHICS <key>` (RUNINSIDE-form only) — optional. One of
-  `libhybris` / `gfxstream` / `cpu`; unknown keys are rejected. When
+  `libhybris` / `turnip` / `none`; unknown keys are rejected. `none` is
+  the "no driver provisioned" state rather than a driver — see
+  [gpu-strategy.md](gpu-strategy.md). When
   set, the broker passes this through to `InstallationMethod.startInside`
-  and `RootfsEnv` uses it instead of `Settings.graphicsBackend` for
-  this spawn only. Tests use it to run a single client under a
-  specific backend without touching the persisted pref.
+  and `RootfsEnv` uses it instead of `RootfsEnv.defaultBackend()` for
+  this spawn only. The host helper exposes it as `--graphics`
+  (`adb::rootfs_run_with`).
 - `OP_TITLE <title>` (ARGV-form / RUNINSIDE-form only) — optional. When
   set, mirrors process stdio into a `LogScreenActivity` panel titled
   with `<title>`. See [BrokerOpMirror].
@@ -325,90 +332,47 @@ enough.
 
 `DevHooks.start` also calls
 `me.phie.tawc.install.InstallActions.registerAll()` (install /
-uninstall), `me.phie.tawc.dev.InputActions.registerAll()` (the test
-input handlers below), `me.phie.tawc.dev.SettingsActions.registerAll()`
-(the settings get/set actions below), and
-`me.phie.tawc.launcher.LauncherActions.registerAll()` (launcher list /
-hide state) to populate `ActionRegistry` before any client connection
-arrives. All four, plus `DevActivityTracker` and the compositor's
-`RecordingImeOutput`, are debug-source-set classes.
+uninstall), `me.phie.tawc.dev.InputActions.registerAll()` (test
+scaffolding: `app-info` / `cleanup-rootfs` / `test-init`), and
+`me.phie.tawc.dev.SettingsActions.registerAll()` (the per-distro ando
+get/set actions) to populate `ActionRegistry` before any client
+connection arrives. Those three, plus `DevActivityTracker`, are
+debug-source-set classes.
 
 A handful of *hooks* the actions call do stay in `src/main`, because
 they read or mutate private state of production classes:
-`Settings.enterTestMode()`, `InstallationStore.setAndoOverride` /
-`clearAndoOverride` / `clearAndoOverrides`,
-`NativeBridge.serviceRefForDev()` / `imeOutput` /
-`nativeCloseAllClientsForTest()`, and
-`ClipboardBridge.setTextFromDevAction` / `getTextForDevAction`. They
-ship in the release DEX with no caller. Each is documented as test-only
-at its definition.
+`Settings.enterTestMode()` and
+`InstallationStore.setAndoOverride` / `clearAndoOverride` /
+`clearAndoOverrides`. They ship in the release DEX with no caller. Each
+is documented as test-only at its definition.
 
 ## Registered actions
 
 | Action | Source | Purpose |
 |--------|--------|---------|
-| `install` | InstallActions | Run the install state machine; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. Use `--foreground-app`. |
+| `install` | InstallActions | Run the install state machine; args `id`, `method`, `distro`, `label`, `mirrorProxy`, `externalBinds`, `ando`, `bootstrap`; mirrors the [Operation] log + progress to host stdout/stderr; cancels on disconnect. Use `--foreground-app`. |
 | `uninstall` | InstallActions | Same shape, opposite direction. Use `--foreground-app`. |
 | `app-info` | InputActions | Prints `nativeLibraryDir=<path>` — where the APK's jniLibs landed on this device. The tawcroot prod-env tests exec `libtawcroot.so` from there (the one app-readable location `untrusted_app` may execve). kv lines, extensible. |
-| `query-state` | InputActions | Calls `NativeBridge.nativeQueryState()` and prints a one-line `key=value` compositor-thread snapshot on stdout: client/toplevel/surface counts, frame + wlegl debug counters, output geometry, `xwayland_running`, and `xwayland_pids` (comma-separated live uid-owned Xwayland pids, zombies excluded). Schema lives in the format string in `compositor/src/event_loop.rs` and the parser in `tests/integration/src/compositor.rs`; unknown keys are ignored, so adding fields is backward-compatible. Observational only — doesn't change input state. Needs no focused activity. |
-| `test-init` | InputActions | Per-test reset: swap `Settings` to an in-memory factory-default store, push live runtime settings, swap `NativeBridge.imeOutput` to a fresh `RecordingImeOutput`, clear the active IC, finish any lingering `LogScreenActivity` left by broker install/uninstall/run actions (restoring whatever was beneath, normally MainActivity), and ask attached Wayland/XWayland client windows to close. Prints `closed=N`; the Rust harness waits for a clean compositor only when `N > 0`, so the normal no-client path stays fast. Does not write `SharedPreferences`; app process death discards it. |
-| `input-ready` | InputActions | Succeeds only when the focused `CompositorActivity` has an active `TawcInputConnection` for its own `SurfaceView`. Used by tests after `onShowKeyboard` so the first `ic-*` action cannot race IC creation. |
-| `focused-editor-info` | InputActions | Test-mode observation of the last `EditorInfo` produced by `RecordingImeOutput` when it created/restarted the IC. Used for activity-scoped content-type coverage. |
-| `ime-selection-updates` | InputActions | Test-mode dump of every `updateSelection` call recorded by `RecordingImeOutput` (`selStart,selEnd,composingStart,composingEnd` lines, oldest first) — the editor→IME boundary the system IME watches. Tests assert no spurious composition-ended signal (`-1,-1`) mid-composition and model the defensive `finishComposingText` reaction real IMEs have to it. |
-| `focused-activity-id` / `focus-activity` | InputActions | Test navigation helpers for multi-document compositor tasks. The first returns the focused compositor Activity id; the second brings that existing `tawc://activity/<id>` document task forward through Android's normal Activity path, then fails unless the target gains window focus within 5s — `startActivity` silently no-ops when Android 10+ blocks background starts, so a tawc activity must already be foreground (from another app, use `su -c 'am start -n me.phie.tawc/.compositor.CompositorActivity -a android.intent.action.VIEW -d tawc://activity/<id>'`). |
-| `ic-commit-text` (`text`) | InputActions | `TawcInputConnection.commitText(text, 1)`. |
-| `ic-commit-completion` (`text`) | InputActions | `TawcInputConnection.commitCompletion(CompletionInfo(..., text))`. |
-| `ic-commit-correction` (`offset`, `old`, `new`) | InputActions | `TawcInputConnection.commitCorrection(CorrectionInfo(...))`. |
-| `ic-replace-text` (`start`, `end`, `text`) | InputActions | `TawcInputConnection.replaceText(start, end, text, 1, null)`. |
-| `ic-set-composing-text` (`text`) | InputActions | `TawcInputConnection.setComposingText(text, 1)`. |
-| `ic-set-composing-region` (`start`, `end`) | InputActions | `TawcInputConnection.setComposingRegion(start, end)`. |
-| `ic-finish-composing` | InputActions | `TawcInputConnection.finishComposingText()`. |
-| `ic-set-selection` (`start`, `end`) | InputActions | `TawcInputConnection.setSelection(start, end)`; currently succeeds only for no-op selection requests because text-input-v3 cannot move the client cursor. |
-| `ic-delete-surrounding-text` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingText(before, after)`. |
-| `ic-delete-surrounding-text-codepoints` (`before`, `after`) | InputActions | `TawcInputConnection.deleteSurroundingTextInCodePoints(before, after)`. |
-| `ic-send-key-event` (`keycode`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode))`. |
-| `ic-send-modified-key-event` (`keycode`, `ctrl`, `alt`, `shift`) | InputActions | `TawcInputConnection.sendKeyEvent(KeyEvent(ACTION_DOWN, keycode, metaState))`. |
-| `ic-finish-hidden-composing` | InputActions | Test-only stale-callback hook: calls `finishComposingText()` on the hidden test IC retained by `RecordingImeOutput` after keyboard hide. Normal `ic-*` actions still require the current focused IC. |
-| `hardware-key` (`keycode`, optional `action`, `repeat`) | InputActions | Dispatch a `KeyEvent` through the focused Activity/view path; `action` is `press` (default), `down`, or `up`. |
-| `back` | InputActions | Dispatch Android Back through the focused activity's back-press path (the entry the system OnBackInvoked callback routes into). Activity-level rather than system input dispatch — compositor Back handling lives below that boundary either way. |
-| `set-graphics-backend` (`value`) | SettingsActions | Write `Settings.graphicsBackend` to the given `GraphicsBackend.key` (`libhybris` / `gfxstream` / `cpu`). In test mode this only mutates the in-memory store. Tests normally pass `--graphics` on each RUNINSIDE spawn instead. |
-| `get-graphics-backend` | SettingsActions | Print the current backend key on stdout. |
-| `set-output-scale` (`value`) | SettingsActions | Snap to the 0.25x grid, save `Settings.outputScale`, and push the live compositor output scale. In test mode this only mutates the in-memory store. |
-| `get-output-scale` | SettingsActions | Print the current output scale. |
-| `set-gtk3-broken-menus-workaround` (`enabled`) | SettingsActions | Save and push the live GTK3 broken menus workaround toggle. In test mode this only mutates the in-memory store. |
-| `get-gtk3-broken-menus-workaround` | SettingsActions | Print the current GTK3 broken menus workaround setting. |
-| `set-ando` (`installId`, `enabled`) | SettingsActions | Set the per-distro ando (notes/ando.md) test override for `installId` and reconcile the broker (`AndoBrokers.refresh`): enable brings the listener up; disable tears it down and SIGKILLs in-flight ando children. In-memory only (never a metadata write); discarded on process death and cleared by `test-init`. Prints `true`/`false`. |
+| `cleanup-rootfs` (`installId`) | InputActions | SIGKILL every process rooted in that install's rootfs (`ProcessScanner.killAllInRootfs`, including chroot processes when the install method is chroot). Prints `rootfs_killed=N`. |
+| `test-init` (optional `installId`) | InputActions | Per-test reset: enter in-memory factory-default settings (`Settings.enterTestMode()`), finish any lingering `LogScreenActivity` left by broker install/uninstall/run actions (restoring whatever was beneath, normally MainActivity), drop per-distro ando overrides and reconcile the brokers (`InstallationStore.clearAndoOverrides` + `AndoBrokers.refresh`), and — when `installId` is given — run the same cleanup as `cleanup-rootfs`. Prints `rootfs_killed=N`. Does not write `SharedPreferences`; app process death discards it. |
+| `set-ando` (`installId`, `enabled` or `value`) | SettingsActions | Set the per-distro ando (notes/ando.md) test override for `installId` and reconcile the broker (`AndoBrokers.refresh`): enable brings the listener up; disable tears it down and SIGKILLs in-flight ando children. In-memory only (never a metadata write); discarded on process death and cleared by `test-init`. Prints `true`/`false`. |
 | `get-ando` (`installId`) | SettingsActions | Print the effective ando state for `installId` (override if set, else metadata). |
-| `launcher-list` (`installId`, optional `showHidden`) | LauncherActions | Print the launcher entry list as a JSON array (`{id, name, exec, terminal, path, hidden}` per element). Mirrors what `LauncherActivity` renders: hidden entries are filtered out unless `showHidden=true` (notes/launcher.md). |
-| `set-entry-hidden` (`installId`, `entryId`, `hidden`) | LauncherActions | Persist launcher hide/unhide for a desktop-entry id through the same locked `Installation.hiddenDesktopIds` metadata write the launcher UI uses. Durable — tests must unhide in cleanup. Prints the resulting hidden-id list. |
 
-**Rule for input actions: every driver goes through `TawcInputConnection`.**
-There is intentionally no broker action that calls `NativeBridge.native*`
-trampolines directly. Tests act as a keyboard (the IC) or as an app
-(observing `wayland-debug-app` events on the wayland side); never as
-something poking the compositor in the middle. Earlier revisions had
-bypass actions (`inject-text`, `set-composing`, …) that skipped the IC
-— they were deleted because text-input-v3's done-ordering produces
-correct GTK observables on the wayland side regardless of what the IC
-computed, so a buggy IC could pass bypass tests and a wayland-side
-assertion became a redundant proof of text-input-v3. Driving every
-scenario through IC closes that. See `notes/text-input.md`
-"Test infrastructure note" for the rationale.
-
-All normal `InputActions` `ic-*` handlers require a focused
-`CompositorActivity` and an active `TawcInputConnection` targeting that
-activity's `SurfaceView`, then post the call to the main looper. The
-handler resolves the activity via `CompositorService.focusedActivity()`
-(walking `activities: Map<String, WeakReference<…>>` for
-`hasWindowFocus()`). No focused activity, no matching IC, or an IC method
-returning `false` becomes a non-zero broker exit instead of a silent skip.
+That is the whole action set. The compositor-era drivers — the `ic-*`
+`TawcInputConnection` actions, `hardware-key`, `back`,
+`inject-touch` / `inject-pointer`, `query-state`, the `focused-*`
+probes, the `clipboard-*` helpers, and the output-scale / Xwayland /
+GTK3 settings setters — were deleted with the display stack
+(`TAWC_DSH_DESIGN.md` §11.5). There is no compositor to drive, no
+client window to focus and no IME bridge to talk to, so nothing
+replaces them.
 
 Cold-starting any of the app's entry points (MainActivity,
-InstallActivity, CompositorActivity) brings up the broker. Stopping the
-app (`am force-stop me.phie.tawc`) tears down the broker thread and
-any in-flight children. Children run in `untrusted_app` (same domain
-as the app) and PDEATHSIG-respect their parent on exit, so force-stop
-kills everything cleanly.
+InstallActivity, DshActivity) brings up the broker. Stopping the
+app (`am force-stop io.github.kaeno_tori.tawc_dsh`) tears down the broker
+thread and any in-flight children. Children run in `untrusted_app` (same
+domain as the app) and PDEATHSIG-respect their parent on exit, so
+force-stop kills everything cleanly.
 
 ### Cancellation: descendant kill
 
@@ -432,7 +396,7 @@ deliberately reparented to init (`ppid == 1`) — most commonly the
 gpgme/libgpg-error `posix_spawn` "double-fork-prevent-zombies" dance
 that pacman's signature verify uses on every package. Those are
 caught instead by the **whole-UID kill** that fires when the app
-itself dies (e.g. `am force-stop me.phie.tawc`): Android SIGKILLs
+itself dies (e.g. `am force-stop io.github.kaeno_tori.tawc_dsh`): Android SIGKILLs
 every process running under the app's uid regardless of parent
 chain. Any cleanup that depends on PPid chains alone is incomplete;
 the UID-wide kill is the actual safety net for orphaned descendants.
@@ -456,9 +420,8 @@ tawc-exec [--foreground-app] --in-rootfs ID [--graphics KEY] [--op-title TITLE] 
 `--foreground-app` starts `MainActivity` even when the app process is
 already running. Install/uninstall actions need it because they start
 `InstallationService` as a foreground service. `RUNINSIDE` does this
-implicitly in CLI mode because the app may need to start the lazy
-compositor foreground service before entering the rootfs; suite mode
-honors only the explicit flag (see "Connect modes" below).
+implicitly in CLI mode (the CLI may hit a cold app); suite mode honors
+only the explicit flag (see "Connect modes" below).
 
 `--op-title TITLE` opts into the in-app log-screen mirror — the broker
 posts an Operation, opens `LogScreenActivity`, and streams stdout /
@@ -471,7 +434,7 @@ flicker the screen open hundreds of times per run).
 It:
 
 1. Picks a free TCP port.
-2. Runs `adb forward tcp:<port> localabstract:me.phie.tawc.exec`.
+2. Runs `adb forward tcp:<port> localabstract:io.github.kaeno_tori.tawc_dsh.exec`.
 3. Connects to `127.0.0.1:<port>`.
 4. Sends the header.
 5. Multiplexes local stdin (frame 0) ↔ socket; demultiplexes socket
@@ -520,26 +483,22 @@ The host side has two connect modes, decided by `TAWC_EXEC_BROKER_PORT`:
   header write rather than at connect.)
 - **CLI mode** (env var unset; `scripts/tawc-exec.sh` from a shell):
   must work against a cold app, so each request probes
-  `pidof me.phie.tawc`, starts `MainActivity` if needed (and always for
-  RUNINSIDE, which may need the foreground app to launch the lazy
-  compositor service), and opens its own short-lived forward.
+  `pidof io.github.kaeno_tori.tawc_dsh`, starts `MainActivity` if needed (and
+  always for RUNINSIDE), and opens its own short-lived forward.
 
 Host-transport rule for integration tests: per-request host process
-spawns are banned; everything app- or compositor-facing goes through the
-broker (`query-state` carries the debug counters and `xwayland_pids`,
-`compositor::is_running` is a query-state round-trip, Back is the `back`
-action). Allowed `Command::new("adb")` exceptions: `screencap_raw` for
-pixel tests, the CLI/fallback paths inside `exec_broker.rs`, suite
-setup/teardown in shell scripts, the wrapped tawcroot suite
-(`tawcroot/test.sh --device`), and `adb::shell` for genuinely shell- or
-su-side work that cannot run as the app uid (`ando` process counting,
-`uninstall_wipe` su sweeps).
+spawns are banned; everything app-facing goes through the broker
+(`rootfs_run` / `rootfs_run_with` dispatch through the RUNINSIDE form,
+and `test-init` / `app-info` / `set-ando` / `get-ando` are broker
+actions). Allowed `Command::new("adb")` exceptions: the CLI/fallback
+paths inside `exec_broker.rs`, suite setup/teardown in shell scripts,
+the wrapped tawcroot suite (`tawcroot/test.sh --device`), and
+`adb::shell` for genuinely shell- or su-side work that cannot run as
+the app uid (`ando` process counting, `uninstall_wipe` su sweeps).
 
-Deliberately rejected while killing the old per-request spawns:
-force-stopping the Xwayland wayland connection in `test-init` (the
-rootfs kill sweep already ends X11 clients; Xwayland restarts add churn
-without isolation value) and a multiplexed long-lived broker protocol
-(per-request local TCP connects are cheap).
+Deliberately rejected while killing the old per-request spawns: a
+multiplexed long-lived broker protocol (per-request local TCP connects
+are cheap).
 
 ## What's not yet done
 
@@ -560,10 +519,11 @@ without isolation value) and a multiplexed long-lived broker protocol
 After the broker rollout, the only remaining privileged paths in dev
 workflows are:
 
-- **`chroot` install method** (`scripts/rootfs-run.sh`,
-  `tests/integration/src/adb.rs`). `chroot(2)` requires
-  `CAP_SYS_CHROOT` — fundamental, not a workaround. tawcroot and proot
-  installs all go through the broker.
+- **`chroot` install method** (`install/ChrootMethod.kt`; the sole
+  `Su.run` consumer in the install package, reached from
+  `scripts/rootfs-run.sh` through the broker's RUNINSIDE form).
+  `chroot(2)` requires `CAP_SYS_CHROOT` — fundamental, not a workaround.
+  tawcroot and proot installs all go through the broker.
 - **`scripts/emulator.sh` setup**: `setenforce 0`, Magisk policy.
   One-time emulator bootstrap, irrelevant once the AVD exists.
 

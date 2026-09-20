@@ -8,7 +8,7 @@
 // translates the open, fds aren't virtualized). The sudo-style flags
 // (-E, -D, -s, -u, -r) are all client-side: env lines, a chdir before
 // the cwd open, and argv rewrites. Protocol and design: notes/ando.md;
-// broker: compositor/src/ando.rs.
+// broker: ando-broker/src/ando.rs.
 //
 // Wire order: fd message first (1 byte + SCM_RIGHTS[stdin, stdout,
 // stderr, cwd]), then the text header, then "SIG <n>" lines out /
@@ -53,7 +53,7 @@ extern char **environ;
 // SOCKET_ENV): lets unrooted tests assert the constructed argv.
 #define SU_ENV "TAWC_ANDO_SU"
 
-// Broker header line limit (compositor/src/ando.rs MAX_LINE, counted
+// Broker header line limit (ando-broker/src/ando.rs MAX_LINE, counted
 // including the newline). -E vars over it are skipped with a warning
 // instead of killing the connection mid-header.
 #define MAX_LINE 65536

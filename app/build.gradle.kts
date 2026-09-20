@@ -23,20 +23,25 @@ run {
     }
 }
 
-// Per-build enabled graphics backends. Default: all four unless the
+// Per-build enabled graphics backends. Default: all three unless the
 // caller passes a production set (scripts/build-release-apk.sh does).
-// Override with
-// `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`.
-// Disabling gfxstream removes the Rust kumquat/gfxstream feature,
-// skips libgfxstream_backend.so, and drops the Mesa gfxstream-vk
-// assets. Disabling both gfxstream and libhybris-zink skips the Mesa
-// cross-build entirely. See
+// Override with `-PtawcGraphics=libhybris,turnip,none`.
+//
+// `none` is not a driver — it is the "no driver provisioned" state, which
+// keeps a key here so a build can drop even that. See
+// `me.phie.tawc.GraphicsBackend.NONE`.
+//
+// The display-only backends (`gfxstream`, `libhybris-zink`) are gone
+// with the compositor (TAWC_DSH_DESIGN.md §11) — gfxstream's kumquat
+// server only ever existed as a thread of that process, and Zink only
+// existed to present GL through it. The Turnip cross-build is
+// independent (its own Mesa pin, `mesa-turnip` in deps/deps.list). See
 // `me.phie.tawc.install.EnabledGraphicsBackends`.
 val explicitTawcGraphics: Set<String>? = (project.findProperty("tawcGraphics") as String?)
     ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
 val enabledGraphics: Set<String> = explicitTawcGraphics
-    ?: setOf("libhybris", "libhybris-zink", "gfxstream", "cpu")
-val knownGraphics = setOf("libhybris", "libhybris-zink", "gfxstream", "cpu")
+    ?: setOf("libhybris", "turnip", "none")
+val knownGraphics = setOf("libhybris", "turnip", "none")
 run {
     val unknown = enabledGraphics - knownGraphics
     require(unknown.isEmpty()) { "Unknown tawcGraphics: $unknown (allowed: $knownGraphics)" }
@@ -44,9 +49,8 @@ run {
         "tawcGraphics must enable at least one backend (got empty set)"
     }
 }
-val libhybrisZinkEnabled: Boolean = "libhybris-zink" in enabledGraphics
-val gfxstreamEnabled: Boolean = "gfxstream" in enabledGraphics
-val mesaBuildNeeded: Boolean = gfxstreamEnabled || libhybrisZinkEnabled
+val libhybrisEnabled: Boolean = "libhybris" in enabledGraphics
+val turnipEnabled: Boolean = "turnip" in enabledGraphics
 
 fun booleanProjectPropertyOrNull(name: String): Boolean? {
     val raw = project.findProperty(name) as String? ?: return null
@@ -72,10 +76,6 @@ val debugPackagesBootstrap: Boolean = explicitPackagesBootstrap ?: true
 val releasePackagesBootstrap: Boolean = explicitPackagesBootstrap ?: false
 val anyVariantPacksDebootstrap: Boolean = debugPackagesBootstrap || releasePackagesBootstrap
 
-// Build and package the bionic Xwayland server for every enabled app
-// ABI, overrideable for lean builds with `-PtawcXwayland=false`.
-val xwaylandRequested: Boolean = booleanProjectProperty("tawcXwayland", true)
-
 // Ship MANAGE_EXTERNAL_STORAGE (the external-storage binds feature,
 // notes/external-binds.md)? Default yes; `-PtawcAllFilesAccess=false`
 // strips the permission via a build-type manifest overlay for
@@ -84,19 +84,34 @@ val xwaylandRequested: Boolean = booleanProjectProperty("tawcXwayland", true)
 // UI, so no code changes ride on this flag.
 val allFilesAccess: Boolean = booleanProjectProperty("tawcAllFilesAccess", true)
 
-// Build the Rust compositor for one or both Android ABIs and copy the
-// resulting .so into jniLibs/. Override the default by setting the
+// Build the native pieces for one or both Android ABIs and copy the
+// resulting binaries into jniLibs/. Override the default by setting the
 // `tawcAbis` Gradle property: `-PtawcAbis=arm64-v8a` or
 // `-PtawcAbis=x86_64` or `-PtawcAbis=arm64-v8a,x86_64`.
 val tawcAbis: List<String> = (project.findProperty("tawcAbis") as String?
     ?: "arm64-v8a").split(",").map { it.trim() }.filter { it.isNotEmpty() }
-val xwaylandScriptAbiFor = mapOf(
-    "arm64-v8a" to "aarch64",
-    "x86_64" to "x86_64",
-)
-val xwaylandPackageAbis: List<String> =
-    if (xwaylandRequested) tawcAbis.filter { it in xwaylandScriptAbiFor } else emptyList()
-val xwaylandPackaged: Boolean = xwaylandPackageAbis.isNotEmpty()
+
+// The version. `versionName` is the single source — nothing else in the repo
+// names a version statically — and `versionCode` is *derived* here rather than
+// written down a second time, so the two cannot drift.
+//
+// Format `major.minor[.patch]`; code = major*10000 + minor*100 + patch:
+// 0.1 → 100, 0.1.1 → 101, 0.2 → 200, 1.0 → 10000. Android only asks that the
+// code increase, and this leaves 100 patches per minor and 100 minors per
+// major. The `0` lower bound of each part is what lets the code stay
+// monotonic while the name goes wherever it likes.
+//
+// scripts/check-version-sync.sh mirrors the arithmetic in bash, but only to
+// report — the copy that stamps an APK is this one, so a disagreement cannot
+// change a build. It also rejects a `versionName` this parse would throw on,
+// which is a second instead of a build.
+val tawcVersionName = "0.1"
+val tawcVersionCode: Int = run {
+    val parts = tawcVersionName.split(".").map { it.toInt() }
+    require(parts.size in 2..3) { "versionName must be major.minor[.patch]: $tawcVersionName" }
+    require(parts.all { it in 0..99 }) { "each versionName part must be 0..99: $tawcVersionName" }
+    parts[0] * 10000 + parts[1] * 100 + parts.getOrElse(2) { 0 }
+}
 
 android {
     namespace = "me.phie.tawc"
@@ -104,12 +119,19 @@ android {
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "me.phie.tawc"
+        // The application id is this fork's identity; `namespace` above is
+        // the Kotlin/Java package and deliberately stays upstream's. Keeping
+        // them apart is what lets the tree keep upstream's class names
+        // verbatim while installing as a distinct app — its own
+        // /data/data/<id>/, no shared state with a `me.phie.tawc` install
+        // alongside, and no class moves.
+        applicationId = "io.github.kaeno_tori.tawc_dsh"
         minSdk = 29
         targetSdk = 36
-        // Plain release counter, single source of truth; see notes/release.md.
-        versionName = "1"
-        versionCode = versionName!!.toInt()
+        // `versionName` is the source; `versionCode` is derived from it above.
+        // See notes/release.md.
+        versionName = tawcVersionName
+        versionCode = tawcVersionCode
         ndk {
             abiFilters.addAll(tawcAbis)
         }
@@ -125,12 +147,9 @@ android {
             buildConfigField("boolean", "METHOD_PROOT_ENABLED",    "${"proot" in debugMethods}")
             buildConfigField("boolean", "METHOD_CHROOT_ENABLED",   "${"chroot" in debugMethods}")
             buildConfigField("boolean", "BOOTSTRAP_PACKAGES_ENABLED", "$debugPackagesBootstrap")
-            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ENABLED",      "${"libhybris" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ZINK_ENABLED", "${"libhybris-zink" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_GFXSTREAM_ENABLED",      "${"gfxstream" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_CPU_ENABLED",            "${"cpu" in enabledGraphics}")
-            buildConfigField("boolean", "XWAYLAND_ENABLED", "$xwaylandPackaged")
-            buildConfigField("boolean", "TINT_BUFFERS_BY_TYPE_DEFAULT", "true")
+            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ENABLED", "${"libhybris" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_TURNIP_ENABLED",    "${"turnip" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_NONE_ENABLED",      "${"none" in enabledGraphics}")
         }
         getByName("release") {
             manifestPlaceholders["logScreenExported"] = "false"
@@ -152,12 +171,9 @@ android {
             buildConfigField("boolean", "METHOD_PROOT_ENABLED",    "${"proot" in releaseMethods}")
             buildConfigField("boolean", "METHOD_CHROOT_ENABLED",   "${"chroot" in releaseMethods}")
             buildConfigField("boolean", "BOOTSTRAP_PACKAGES_ENABLED", "$releasePackagesBootstrap")
-            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ENABLED",      "${"libhybris" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ZINK_ENABLED", "${"libhybris-zink" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_GFXSTREAM_ENABLED",      "${"gfxstream" in enabledGraphics}")
-            buildConfigField("boolean", "GRAPHICS_CPU_ENABLED",            "${"cpu" in enabledGraphics}")
-            buildConfigField("boolean", "XWAYLAND_ENABLED", "$xwaylandPackaged")
-            buildConfigField("boolean", "TINT_BUFFERS_BY_TYPE_DEFAULT", "false")
+            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ENABLED", "${"libhybris" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_TURNIP_ENABLED",    "${"turnip" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_NONE_ENABLED",      "${"none" in enabledGraphics}")
         }
     }
 
@@ -173,36 +189,6 @@ android {
                 variant.packaging.jniLibs.excludes.addAll(
                     "**/libproot.so",
                     "**/libproot-loader.so",
-                )
-            }
-            if (!xwaylandPackaged) {
-                variant.packaging.jniLibs.excludes.addAll(
-                    "**/libxwayland.so",
-                    "**/libxkbcomp.so",
-                    "**/libX11-xcb.so",
-                    "**/libX11.so",
-                    "**/libXau.so",
-                    "**/libXfont2.so",
-                    "**/libdrm.so",
-                    "**/libffi.so",
-                    "**/libfontenc.so",
-                    "**/libfreetype.so",
-                    "**/libmd.so",
-                    "**/libpixman-1.so",
-                    "**/libwayland-client.so",
-                    "**/libwayland-cursor.so",
-                    "**/libwayland-egl.so",
-                    "**/libwayland-server.so",
-                    "**/libxcb*.so",
-                    "**/libxcvt.so",
-                    "**/libxkbfile.so",
-                    "**/libxshmfence.so",
-                )
-            }
-            if (!gfxstreamEnabled) {
-                variant.packaging.jniLibs.excludes.addAll(
-                    "**/libgfxstream_backend.so",
-                    "**/libc++_shared.so",
                 )
             }
         }
@@ -279,19 +265,14 @@ android {
         }
     }
 
-    if (!xwaylandPackaged) {
+    if (!turnipEnabled) {
         androidResources {
-            ignoreAssetsPatterns.add("xwayland")
+            ignoreAssetsPatterns.add("turnip")
         }
     }
-    if (!gfxstreamEnabled) {
+    if (!libhybrisEnabled) {
         androidResources {
-            ignoreAssetsPatterns.add("mesa-gfxstream")
-        }
-    }
-    if (!libhybrisZinkEnabled) {
-        androidResources {
-            ignoreAssetsPatterns.add("mesa-zink")
+            ignoreAssetsPatterns.add("libhybris")
         }
     }
 }
@@ -315,9 +296,10 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ShortcutManagerCompat + IconCompat for pinned home-screen
-    // shortcuts (EntryShortcuts). Already on the classpath transitively
-    // via material; explicit because we compile against it directly.
+    // ActivityCompat / ServiceCompat / ViewCompat / WindowInsetsCompat
+    // and the `edit {}` SharedPreferences extension. Already on the
+    // classpath transitively via material; explicit because we compile
+    // against it directly.
     implementation("androidx.core:core-ktx:1.15.0")
 
     // RecyclerView backs the licenses screen, whose ~750 KB attribution
@@ -326,8 +308,8 @@ dependencies {
     // already resolves, so this only makes the existing edge explicit.
     implementation("androidx.recyclerview:recyclerview:1.1.0")
 
-    // Material Components powers the app's chrome on non-compositor screens:
-    // Material3 DayNight theme (auto light/dark), MaterialToolbar with the
+    // Material Components powers the app's chrome: Material3 DayNight
+    // theme (auto light/dark), MaterialToolbar with the
     // back-arrow up affordance, and MaterialButton for the accented /
     // destructive button styles. AppCompat is pulled in transitively.
     implementation("com.google.android.material:material:1.12.0")
@@ -348,13 +330,6 @@ dependencies {
     testImplementation("org.json:json:20240303")
 }
 
-val checkInputConnectionAudit = tasks.register<Exec>("checkInputConnectionAudit") {
-    workingDir = rootProject.projectDir
-    commandLine("scripts/check-inputconnection-audit.sh")
-    inputs.file("$rootDir/app/build.gradle.kts")
-    inputs.file("$rootDir/scripts/check-inputconnection-audit.sh")
-}
-
 // The exec broker and its actions live in `src/debug/java`, so they are
 // structurally absent from release builds rather than merely unstarted
 // (notes/exec-broker.md). Assert that on the compiled release classes —
@@ -370,24 +345,13 @@ val checkNoDevCode = tasks.register<Exec>("checkNoDevCode") {
 }
 
 tasks.named("check") {
-    dependsOn(checkInputConnectionAudit, checkNoDevCode)
+    dependsOn(checkNoDevCode)
 }
 
 val rustTripleFor = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
     "x86_64" to "x86_64-linux-android",
 )
-
-// Map an Android ABI to the (script flag, builddir name) pair
-// `scripts/build-libxkbcommon.sh` uses. The compositor's build.rs reads
-// `deps/libxkbcommon/<builddir>/libxkbcommon.a` for the matching arch.
-val xkbForAbi = mapOf(
-    "arm64-v8a" to ("aarch64" to "builddir"),
-    "x86_64" to ("x86_64" to "builddir-x86_64"),
-)
-
-val tawcRootForSmithay = rootProject.projectDir
-val smithayCargoToml = "$tawcRootForSmithay/deps/smithay/Cargo.toml"
 
 // Working-tree fingerprint (HEAD + tracked-edit hash) for the named deps,
 // via `ensure-deps.sh --tree-state`. Declared as an input property on every
@@ -400,118 +364,11 @@ fun depTreeState(vararg deps: String): Provider<String> = providers.exec {
     commandLine(listOf("scripts/ensure-deps.sh", "--tree-state") + deps)
 }.standardOutput.asText
 
-// Ensure the smithay checkout exists before cargo runs. Cargo's
-// `[patch.crates-io] smithay = { path = "../deps/smithay" }` errors
-// up front if the dir is missing — so this has to come before the
-// per-ABI `buildRustLibrary*` tasks. Pin lives in deps/deps.list.
-val setupSmithayTask = tasks.register<Exec>("setupSmithay") {
-    workingDir = tawcRootForSmithay
-    commandLine("scripts/ensure-deps.sh", "smithay")
-    inputs.file("$tawcRootForSmithay/scripts/ensure-deps.sh")
-    inputs.file("$tawcRootForSmithay/deps/deps.list")
-    inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
-    outputs.file(smithayCargoToml)
-}
-
-// Apply our rutabaga_gfx patches (in particular
-// `03-kumquat-server-as-lib.patch`, which exposes the `KumquatBuilder`
-// type the compositor links against). The compositor's
-// `kumquat_virtio = { path = "../deps/rutabaga_gfx/kumquat/server" }`
-// dep resolves at cargo metadata time, so this has to run before
-// `buildRustLibrary<Abi>`. Sentinel-gated inside the script, so
-// gradle just re-invokes it cheaply when patches change.
-val rutabagaPatchSentinel = "$tawcRootForSmithay/deps/rutabaga_gfx/kumquat/server/src/lib.rs"
-val setupRutabagaTask = tasks.register<Exec>("setupRutabaga") {
-    workingDir = tawcRootForSmithay
-    commandLine("scripts/ensure-deps.sh", "--patches", "rutabaga_gfx", "deps/rutabaga-patches/rutabaga_gfx")
-    inputs.file("$tawcRootForSmithay/scripts/ensure-deps.sh")
-    inputs.dir("$tawcRootForSmithay/deps/rutabaga-patches")
-    inputs.file("$tawcRootForSmithay/deps/deps.list")
-    inputs.file("$tawcRootForSmithay/scripts/lib/deps.sh")
-    // src/lib.rs only exists post-patch (03-kumquat-server-as-lib
-    // creates it), so its presence is a valid up-to-date signal for
-    // Gradle's incremental tracking.
-    outputs.file(rutabagaPatchSentinel)
-}
-
 tawcAbis.forEach { abi ->
     val triple = rustTripleFor[abi] ?: error("Unsupported ABI: $abi")
     val capAbi = abi.replaceFirstChar { it.uppercase() }
 
-    // Cross-build the static libxkbcommon the Rust compositor links
-    // against. Same shape as buildLibhybris: invokes the host script,
-    // skipped when the output artefact already exists.
     val tawcRoot = rootProject.projectDir
-    val (xkbAbiFlag, xkbBuilddir) = xkbForAbi[abi]
-        ?: error("Unsupported ABI for libxkbcommon: $abi")
-    val xkbStaticLib = "$tawcRoot/deps/libxkbcommon/$xkbBuilddir/libxkbcommon.a"
-    val buildLibxkbcommonTask = tasks.register<Exec>("buildLibxkbcommon$capAbi") {
-        workingDir = tawcRoot
-        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        commandLine("scripts/build-libxkbcommon.sh", "--abi=$xkbAbiFlag")
-        inputs.file("$tawcRoot/scripts/build-libxkbcommon.sh")
-        // Manifest + helper changes must invalidate the cache — otherwise a
-        // bumped pin in deps/deps.list silently no-ops while the .a stays
-        // built against the old commit. See AGENTS.md "Vendored deps".
-        inputs.file("$tawcRoot/deps/deps.list")
-        inputs.file("$tawcRoot/scripts/lib/deps.sh")
-        inputs.property("depTreeState", depTreeState("libxkbcommon"))
-        outputs.file(xkbStaticLib)
-    }
-
-    val buildTask = tasks.register<Exec>("buildRustLibrary$capAbi") {
-        // setupRutabaga runs even without gfxstream: cargo resolves
-        // `kumquat_virtio`'s path dep while parsing the manifest, whether or
-        // not the feature that uses it is enabled, so a clone missing
-        // deps/rutabaga_gfx fails before any code is compiled. Only a fresh
-        // checkout hits this — a dev tree already has the dir.
-        dependsOn(buildLibxkbcommonTask, setupSmithayTask, setupRutabagaTask)
-        workingDir = file("${rootProject.projectDir}/compositor")
-        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-        val cargoArgs = mutableListOf(
-            "cargo", "ndk",
-            "--target", abi,
-            "--platform", "29",
-            "--",
-            "build", "--release",
-        )
-        if (gfxstreamEnabled) {
-            cargoArgs += listOf("--features", "gfxstream")
-        } else {
-            cargoArgs += "--no-default-features"
-        }
-        commandLine(cargoArgs)
-        inputs.files(
-            "${rootProject.projectDir}/compositor/Cargo.toml",
-            "${rootProject.projectDir}/compositor/Cargo.lock",
-            "${rootProject.projectDir}/compositor/build.rs",
-            "$tawcRoot/deps/deps.list",
-            xkbStaticLib,
-        )
-        inputs.dir("${rootProject.projectDir}/compositor/src")
-        inputs.dir("${rootProject.projectDir}/compositor/protocols")
-        inputs.dir("${rootProject.projectDir}/compositor/native")
-        inputs.files(fileTree("$tawcRoot/deps/smithay") {
-            exclude(".git/**", "target/**")
-        })
-        inputs.property("gfxstreamEnabled", gfxstreamEnabled)
-        if (gfxstreamEnabled) {
-            inputs.files(fileTree("$tawcRoot/deps/rutabaga_gfx") {
-                exclude(".git/**", "build/**", "target/**")
-            })
-        }
-        outputs.file("${rootProject.projectDir}/compositor/target/$triple/release/libcompositor.so")
-    }
-
-    val copyTask = tasks.register<Copy>("copyRustLibrary$capAbi") {
-        dependsOn(buildTask)
-        from("${rootProject.projectDir}/compositor/target/$triple/release/libcompositor.so")
-        into("src/main/jniLibs/$abi/")
-    }
-
-    tasks.named("preBuild") {
-        dependsOn(copyTask)
-    }
 
     // Cross-build proot (Termux fork) and stage libproot.so +
     // libproot-loader.so under jniLibs. Same shape as buildLibhybris:
@@ -586,58 +443,44 @@ tawcAbis.forEach { abi ->
     tasks.named("preBuild") {
         dependsOn(buildAndoTask)
     }
-}
 
-// Cross-build the gfxstream host renderer (libgfxstream_backend.so) for
-// every enabled Android ABI and stage it under jniLibs/ alongside
-// libcompositor.so when the gfxstream backend is enabled.
-//
-// When enabled, libcompositor.so links against `gfxstream_backend` via
-// the `kumquat_virtio` dep (compositor/Cargo.toml `gfxstream` feature),
-// which expects to find the .so at the path in `GFXSTREAM_PATH_RELEASE`.
-// The kumquat server itself runs as a thread of the compositor process —
-// no separate daemon, no broker plumbing. See notes/gfxstream-bridge.md.
-val gfxstreamAbiToScriptArg = mapOf("arm64-v8a" to "aarch64", "x86_64" to "x86_64")
-tawcAbis.forEach { abi ->
-    val tawcRoot = rootProject.projectDir
-    val scriptAbi = gfxstreamAbiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
-    val capAbi = abi.replaceFirstChar { it.uppercase() }
-    val bridgeJniLibsDir = "$tawcRoot/app/src/main/jniLibs/$abi"
-    val gfxstreamLib = "$bridgeJniLibsDir/libgfxstream_backend.so"
-    val libcppLib = "$bridgeJniLibsDir/libc++_shared.so"
-    val gfxstreamOutDir = "$tawcRoot/build/gfxstream-android-$scriptAbi"
-
-    if (gfxstreamEnabled) {
-        val buildGfxstreamBackendTask = tasks.register<Exec>("buildGfxstreamBackend$capAbi") {
-            workingDir = tawcRoot
-            environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-            commandLine("scripts/build-gfxstream-backend.sh", "--abi=$scriptAbi")
-            inputs.file("$tawcRoot/scripts/build-gfxstream-backend.sh")
-            inputs.dir("$tawcRoot/deps/gfxstream-patches")
-            // Pin bumps in deps/deps.list (gfxstream) must invalidate.
-            inputs.file("$tawcRoot/deps/deps.list")
-            inputs.file("$tawcRoot/scripts/lib/deps.sh")
-            inputs.property("depTreeState", depTreeState("gfxstream"))
-            outputs.files(gfxstreamLib, libcppLib)
-        }
-
-        // The cargo build needs the .so present *and* its location in
-        // `GFXSTREAM_PATH_RELEASE` so rutabaga's build.rs emits the right
-        // `-L` / `-l` flags. We extend the existing `buildRustLibrary<Abi>`
-        // task (registered above in the per-ABI loop) instead of
-        // duplicating the cross-build wrapper.
-        tasks.named<Exec>("buildRustLibrary$capAbi") {
-            dependsOn(buildGfxstreamBackendTask)
-            environment("GFXSTREAM_PATH_RELEASE", gfxstreamOutDir)
-            inputs.file("$gfxstreamOutDir/libgfxstream_backend.so")
-        }
-    } else {
-        val deleteGfxstreamBackendTask = tasks.register<Delete>("deleteGfxstreamBackend$capAbi") {
-            delete(gfxstreamLib, libcppLib)
-        }
-        tasks.named("preBuild") {
-            dependsOn(deleteGfxstreamBackendTask)
-        }
+    // Cross-build the ando JNI bridge and stage libandobridge.so under
+    // jniLibs.
+    //
+    // Why a separate Rust library: `System.loadLibrary` loads a whole
+    // .so, so keeping ando's JNI shell in its own library means the
+    // broker can start without dragging in whatever else the app links
+    // natively. This crate links the `ando-broker` rlib. See
+    // notes/ando.md "Components".
+    val andoBridgeSo = "$tawcRoot/andobridge/target/$triple/release/libandobridge.so"
+    val buildAndoBridgeTask = tasks.register<Exec>("buildAndoBridge$capAbi") {
+        workingDir = file("${rootProject.projectDir}/andobridge")
+        environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
+        commandLine(
+            "cargo", "ndk",
+            "--target", abi,
+            "--platform", "29",
+            "--",
+            "build", "--release",
+        )
+        inputs.files(
+            "${rootProject.projectDir}/andobridge/Cargo.toml",
+            "${rootProject.projectDir}/andobridge/Cargo.lock",
+            "${rootProject.projectDir}/ando-broker/Cargo.toml",
+        )
+        inputs.dir("${rootProject.projectDir}/andobridge/src")
+        // The broker logic itself is a path dep, so editing it has to
+        // invalidate this task's cache too.
+        inputs.dir("${rootProject.projectDir}/ando-broker/src")
+        outputs.file(andoBridgeSo)
+    }
+    val copyAndoBridgeTask = tasks.register<Copy>("copyAndoBridge$capAbi") {
+        dependsOn(buildAndoBridgeTask)
+        from(andoBridgeSo)
+        into("src/main/jniLibs/$abi/")
+    }
+    tasks.named("preBuild") {
+        dependsOn(copyAndoBridgeTask)
     }
 }
 
@@ -700,8 +543,7 @@ if (anyVariantPacksDebootstrap) {
 
 // The debootstrap tar used to be generated straight into
 // src/main/assets, which shipped it in every APK including release.
-// Delete leftovers from such a tree so they don't ride along; same
-// trap as pruneStaleXwaylandAssets below.
+// Delete leftovers from such a tree so they don't ride along.
 val pruneStaleDebootstrapAssets = tasks.register<Delete>("pruneStaleDebootstrapAssets") {
     delete("src/main/assets/debootstrap")
 }
@@ -711,7 +553,7 @@ tasks.named("preBuild") {
 
 // Cross-compile libhybris for aarch64 glibc on the host and pack it
 // (with symlinks preserved) as an APK asset. Extracted at runtime by
-// CompositorService.ensureLibhybrisExtracted into the app's filesDir
+// TawcAssets.ensureLibhybrisExtracted into the app's filesDir
 // and copied into each rootfs as real files by LibhybrisInstallProvider.
 //
 // Only aarch64 — libhybris is unsupported on the x86_64 emulator
@@ -721,7 +563,7 @@ tasks.named("preBuild") {
 // The actual cross-compile lives in scripts/build-libhybris.sh so
 // it can be run by hand for development. This Gradle task just invokes
 // it and packs the result.
-if ("arm64-v8a" in tawcAbis) {
+if (libhybrisEnabled && "arm64-v8a" in tawcAbis) {
     val tawcRoot = rootProject.projectDir
     val libhybrisAbi = "arm64-v8a"
     // build-libhybris.sh now passes `--prefix=/usr/lib/hybris
@@ -760,7 +602,7 @@ if ("arm64-v8a" in tawcAbis) {
         // tree so paths in the tar are relative.
         //
         // Tar contents are flat (libEGL.so, libhybris/, gl-shims/, …
-        // at the tar root) — `CompositorService.ensureLibhybrisExtracted`
+        // at the tar root) — `TawcAssets.ensureLibhybrisExtracted`
         // extracts them into `<filesDir>/libhybris/` and
         // [LibhybrisInstallProvider] walks that dir directly.
         doFirst { mkdir(file(libhybrisAssetFile).parentFile) }
@@ -783,211 +625,74 @@ if ("arm64-v8a" in tawcAbis) {
     }
 } // end libhybris (arm64-v8a in tawcAbis)
 
-// Cross-build Mesa's chroot-side graphics bits when a Mesa-backed
-// backend is enabled:
-//   - gfxstream-vk assets for GraphicsBackend.GFXSTREAM
-//   - Mesa-Zink tarball for GraphicsBackend.LIBHYBRIS_ZINK
+// Cross-compile Mesa's Turnip (freedreno Vulkan, kgsl-only) for aarch64
+// and stage the three files the TURNIP graphics backend lays into each
+// rootfs: the ICD itself, its manifest, and the Vulkan loader that
+// reaches it. aarch64-only — an x86_64 build ships no Turnip asset and
+// falls back to the CPU backend there.
 //
-// The Mesa source emits the ICD JSON with an arch-suffixed name
-// (`gfxstream_vk_icd.aarch64.json` / `gfxstream_vk_icd.x86_64.json`).
-// We rename to a single `gfxstream_vk_icd.json` in the asset dir so
-// the runtime extractor doesn't need to know the arch.
-val mesaGfxstreamAbiToScriptArg = mapOf(
-    "arm64-v8a" to ("aarch64" to "aarch64"),
-    "x86_64"    to ("x86_64"  to "x86_64"),
-)
-tawcAbis.forEach { abi ->
+// Staged straight into src/main/assets/turnip/<abi>/ as three plain
+// files: no symlinks anywhere in this set, so unlike libhybris it needs
+// no tar wrapper. The runtime extracts them into <filesDir>/turnip/ via
+// TawcAssets.ensureTurnipExtracted; TawcrootMethod binds that dir
+// read-only at /usr/lib/turnip, proot/chroot get real copies from
+// TurnipInstallProvider.
+//
+// The cross-compile itself lives in scripts/build-turnip.sh so it can be
+// run by hand for development; Gradle just invokes it and packs the
+// result.
+if ("arm64-v8a" in tawcAbis) {
     val tawcRoot = rootProject.projectDir
-    val (scriptAbi, mesonCpu) = mesaGfxstreamAbiToScriptArg[abi] ?: error("Unsupported ABI: $abi")
-    val capAbi = abi.replaceFirstChar { it.uppercase() }
-    val mesaInstallRoot = "$tawcRoot/build/mesa-$scriptAbi/install/usr/lib"
-    val mesaGfxstreamLib = "$mesaInstallRoot/gfxstream/libvulkan_gfxstream.so"
-    val mesaGfxstreamIcd = "$mesaInstallRoot/gfxstream/gfxstream_vk_icd.$mesonCpu.json"
-    val mesaGfxstreamAssetDir = "src/main/assets/mesa-gfxstream/$abi"
-    // Mesa-Zink tarball (libEGL_mesa.so.0 + libgallium-X.Y.Z.so + libgbm.so.1 +
-    // soname symlinks) — see scripts/build-mesa-gfxstream.sh "Mesa-Zink".
-    // Consumed by the LIBHYBRIS_ZINK graphics backend; see
-    // notes/libhybris-zink.md.
-    val mesaZinkTar = "$mesaInstallRoot/mesa-zink-$mesonCpu.tar"
-    val mesaZinkAssetDir = "src/main/assets/mesa-zink/$abi"
+    val turnipAbi = "arm64-v8a"
+    val turnipInstallDir = "$tawcRoot/build/turnip-aarch64/install/usr/lib/turnip"
+    val turnipAssetDir = "src/main/assets/turnip/$turnipAbi"
 
-    val buildMesaGfxstreamTask = if (mesaBuildNeeded) {
-        tasks.register<Exec>("buildMesaGfxstream$capAbi") {
+    val buildTurnipTask = if (turnipEnabled) {
+        tasks.register<Exec>("buildTurnip") {
             workingDir = tawcRoot
-            val args = mutableListOf("bash", "scripts/build-mesa-gfxstream.sh", "--abi=$scriptAbi")
-            if (!gfxstreamEnabled) args += "--no-gfxstream"
-            if (!libhybrisZinkEnabled) args += "--no-zink"
-            commandLine(args)
+            commandLine("scripts/build-turnip.sh")
             // Same incremental-input contract as buildLibhybris:
             //   - the build script
-            //   - the patches dir (a patch edit must rebuild)
-            //   - dep manifest + helper (a Mesa pin bump must rebuild)
-            inputs.file("$tawcRoot/scripts/build-mesa-gfxstream.sh")
-            inputs.file("$tawcRoot/scripts/build-host-sysroot.sh")
-            inputs.dir("$tawcRoot/deps/mesa-patches")
+            //   - dep manifest + helper (the mesa-turnip pin bump has to
+            //     invalidate this, or the APK keeps shipping the old
+            //     driver; see AGENTS.md "Vendored deps")
+            inputs.file("$tawcRoot/scripts/build-turnip.sh")
             inputs.file("$tawcRoot/deps/deps.list")
             inputs.file("$tawcRoot/scripts/lib/deps.sh")
-            inputs.property("depTreeState", depTreeState("mesa", "wayland-protocols"))
-            inputs.property("gfxstreamEnabled", gfxstreamEnabled)
-            inputs.property("libhybrisZinkEnabled", libhybrisZinkEnabled)
-            val out = mutableListOf<Any>()
-            if (gfxstreamEnabled) out.addAll(listOf(mesaGfxstreamLib, mesaGfxstreamIcd))
-            if (libhybrisZinkEnabled) out.add(mesaZinkTar)
-            outputs.files(out)
+            inputs.property("depTreeState", depTreeState("mesa-turnip"))
+            outputs.dir(turnipInstallDir)
         }
     } else {
         null
     }
 
-    val packMesaGfxstreamTask = if (gfxstreamEnabled) {
-        tasks.register<Copy>("packMesaGfxstream$capAbi") {
-            dependsOn(buildMesaGfxstreamTask!!)
-            // Two raw assets — no symlinks, so no tar wrapper needed (unlike
-            // libhybris). Rename the arch-suffixed ICD JSON to a single
-            // generic name so the runtime extractor opens the same file on
-            // both ABIs.
-            into("${project.projectDir}/$mesaGfxstreamAssetDir")
-            from(mesaGfxstreamLib)
-            from(mesaGfxstreamIcd) {
-                rename { "gfxstream_vk_icd.json" }
-            }
+    // Sync, not Copy: the asset dir is fully generated, and a driver
+    // rename would otherwise leave the old .so behind to ship silently.
+    val packTurnipTask = if (turnipEnabled) {
+        tasks.register<Sync>("packTurnip") {
+            dependsOn(buildTurnipTask!!)
+            into("${project.projectDir}/$turnipAssetDir")
+            from(turnipInstallDir)
         }
     } else {
-        tasks.register<Delete>("packMesaGfxstream$capAbi") {
-            delete("${project.projectDir}/$mesaGfxstreamAssetDir")
-        }
-    }
-
-    // Skip when libhybris-zink is disabled — no Mesa-Zink build runs, no
-    // tar to pack, nothing to ship. Wipe any stale asset from a previous
-    // enabled build so the APK doesn't smuggle 22 MB of dead weight.
-    val packMesaZinkTask = if (libhybrisZinkEnabled) {
-        tasks.register<Copy>("packMesaZink$capAbi") {
-            dependsOn(buildMesaGfxstreamTask!!)
-            // Tarball with symlinks (libEGL_mesa.so → libEGL_mesa.so.0 → …).
-            // Same shape as the libhybris asset; runtime extractor mirrors.
-            into("${project.projectDir}/$mesaZinkAssetDir")
-            from(mesaZinkTar) {
-                rename { "mesa-zink.tar" }
-            }
-        }
-    } else {
-        tasks.register<Delete>("packMesaZink$capAbi") {
-            delete("${project.projectDir}/$mesaZinkAssetDir")
+        tasks.register<Delete>("packTurnip") {
+            delete("${project.projectDir}/$turnipAssetDir")
         }
     }
 
     tasks.named("preBuild") {
-        dependsOn(packMesaGfxstreamTask)
-        dependsOn(packMesaZinkTask)
+        dependsOn(packTurnipTask)
     }
-}
-
-if (xwaylandPackaged) {
-    val tawcRoot = rootProject.projectDir
-
-    // Cross-compile Xwayland (and its bionic-ported X11 / font / pixman
-    // dep tree) and stage the result for the APK. Binaries + DT_NEEDED
-    // libs ride in `jniLibs/<abi>/lib*.so` (so they land in
-    // `nativeLibraryDir`, the only on-disk place untrusted_app may
-    // exec on Android 10+); the XKB data tree is tarred into
-    // `assets/xwayland/share.tar` because Xwayland reads it via fopen
-    // at the baked-in `-Dxkb_dir` path. Extracted/symlinked at runtime
-    // by `CompositorService.ensureXwaylandExtracted` into
-    // `<filesDir>/xwayland/`, which the compositor then exec()s as the
-    // X server child for any X11 client. The cross-compile lives in
-    // `scripts/build-xwayland.sh`; see notes/xwayland.md for the
-    // full pipeline.
-    val xwaylandBuildTasks = mutableListOf<TaskProvider<Exec>>()
-    val xwaylandStageTasks = mutableListOf<TaskProvider<Copy>>()
-    val xwaylandInstallDirForAbi = mutableMapOf<String, String>()
-
-    // Stage Xwayland's exec'ables and runtime libs as `lib*.so` files
-    // under `jniLibs/<abi>/`. Files in nativeLibraryDir get the
-    // `apk_data_file` SELinux type, which untrusted_app *can* exec —
-    // unlike `app_data_file` (the type assigned to anything we extract
-    // into filesDir), where `execute_no_trans` is denied on Android 10+
-    // and would otherwise force us to ship a `magiskpolicy --live` rule
-    // via su. Same trick proot already uses (libproot.so).
-    //
-    // Naming: jniLibs entries must match `lib*.so`, so `Xwayland` →
-    // `libxwayland.so` and `xkbcomp` → `libxkbcomp.so`. The Kotlin side
-    // creates `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks
-    // pointing at these so the compositor's existing PATH lookup is
-    // unaffected.
-    //
-    // The build's `lib/` already ships flat `lib*.so` files (no
-    // version-suffix symlinks — see scripts/build-xwayland.sh), so they
-    // can be copied straight into jniLibs without flattening.
-    xwaylandPackageAbis.forEach { abi ->
-        val capAbi = abi.replaceFirstChar { it.uppercase() }
-        val scriptAbi = xwaylandScriptAbiFor[abi]
-            ?: error("Unsupported ABI for Xwayland: $abi")
-        val xwaylandInstallDir = "$tawcRoot/build/xwayland-$scriptAbi/install"
-        xwaylandInstallDirForAbi[abi] = xwaylandInstallDir
-
-        val buildXwaylandTask = tasks.register<Exec>("buildXwayland$capAbi") {
-            workingDir = tawcRoot
-            environment("ANDROID_NDK_HOME", "${android.ndkDirectory}")
-            commandLine("scripts/build-xwayland.sh", "--abi=$scriptAbi")
-            // Same incremental story as `buildLibhybris`. Tracked inputs:
-            //   - build script
-            //   - patches dir (a patch edit must rebuild)
-            //   - dep manifest + helper (a pin bump must rebuild)
-            inputs.file("$tawcRoot/scripts/build-xwayland.sh")
-            inputs.dir("$tawcRoot/deps/xwayland-patches")
-            inputs.file("$tawcRoot/deps/deps.list")
-            inputs.file("$tawcRoot/scripts/lib/deps.sh")
-            inputs.property("depTreeState", depTreeState("deps/xwayland-src/"))
-            outputs.dir(xwaylandInstallDir)
-        }
-        xwaylandBuildTasks += buildXwaylandTask
-
-        val stageXwaylandJniLibsTask = tasks.register<Copy>("stageXwaylandJniLibs$capAbi") {
-            dependsOn(buildXwaylandTask)
-            into("${project.projectDir}/src/main/jniLibs/$abi")
-            from("$xwaylandInstallDir/bin/Xwayland") { rename { "libxwayland.so" } }
-            from("$xwaylandInstallDir/bin/xkbcomp") { rename { "libxkbcomp.so" } }
-            from("$xwaylandInstallDir/lib") { include("*.so") }
-        }
-        xwaylandStageTasks += stageXwaylandJniLibsTask
+} else {
+    // No arm64 target in this build (e.g. `-PtawcAbis=x86_64`): wipe any
+    // staged driver from a previous arm64 build so the APK can't smuggle
+    // 16 MB of dead weight.
+    tasks.register<Delete>("pruneStaleTurnipAssets") {
+        delete("src/main/assets/turnip")
     }
-
-    // The XKB data files (`share/X11`, `share/xkeyboard-config-2`)
-    // can't be flattened into jniLibs — Xwayland reads them via fopen
-    // and the files reference each other by relative paths inside the
-    // tree. Ship them as a tar asset and extract at runtime as before.
-    val xwaylandShareAbi = xwaylandPackageAbis.first()
-    val xwaylandShareBuildTask = xwaylandBuildTasks.first()
-    val xwaylandShareInstallDir = xwaylandInstallDirForAbi[xwaylandShareAbi]
-        ?: error("No Xwayland install dir for $xwaylandShareAbi")
-    val xwaylandShareAssetFile = "src/main/assets/xwayland/share.tar"
-    val packXwaylandShareTask = tasks.register<Exec>("packXwaylandShare") {
-        dependsOn(xwaylandShareBuildTask)
-        doFirst { mkdir(file(xwaylandShareAssetFile).parentFile) }
-        workingDir = file(xwaylandShareInstallDir)
-        commandLine("tar", "--format=ustar",
-            "-cf", "${project.projectDir}/$xwaylandShareAssetFile",
-            "share/X11", "share/xkeyboard-config-2")
-        inputs.dir("$xwaylandShareInstallDir/share/X11")
-        inputs.dir("$xwaylandShareInstallDir/share/xkeyboard-config-2")
-        outputs.file(xwaylandShareAssetFile)
-    }
-
     tasks.named("preBuild") {
-        dependsOn(xwaylandStageTasks)
-        dependsOn(packXwaylandShareTask)
+        dependsOn("pruneStaleTurnipAssets")
     }
-}
+} // end turnip (arm64-v8a in tawcAbis)
 
-// assets/xwayland must contain exactly share.tar. Generated files under
-// src/main/assets ship silently, so a stale artifact from a retired
-// packaging scheme rides along in every APK unnoticed (the pre-jniLibs
-// arm64-v8a.tar shipped ~3.6 MB of dead weight for two months). Prune
-// anything else before packaging.
-val pruneStaleXwaylandAssets = tasks.register<Delete>("pruneStaleXwaylandAssets") {
-    delete(fileTree("src/main/assets/xwayland") { exclude("share.tar") })
-}
-tasks.named("preBuild") {
-    dependsOn(pruneStaleXwaylandAssets)
-}
+

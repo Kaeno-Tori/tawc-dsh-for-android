@@ -17,8 +17,6 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.InterruptedIOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
 import me.phie.tawc.R
 
@@ -28,8 +26,8 @@ import me.phie.tawc.R
  * This is the integrity barrier between [Downloader] writing bytes to
  * disk and [Archive.extractAsRoot] handing those bytes to root-running
  * tar. Anything that gets past this gate is treated as trustworthy
- * enough to lay down inside the chroot the user then runs Wayland apps
- * in — see notes/installation.md "Bootstrap integrity".
+ * enough to lay down inside the chroot the user then runs in — see
+ * notes/installation.md "Bootstrap integrity".
  *
  * The PGP consumers are both Arch flavours:
  *
@@ -163,7 +161,7 @@ object SignatureVerifier {
 
     private fun downloadBytes(url: String): ByteArray {
         if (Thread.interrupted()) throw InterruptedIOException("download cancelled")
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+        val conn = Http.open(url).apply {
             connectTimeout = 30_000
             readTimeout = 30_000
             instanceFollowRedirects = true

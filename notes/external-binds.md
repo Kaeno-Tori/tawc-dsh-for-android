@@ -3,7 +3,7 @@
 Per-install binds of host directories into the rootfs, so users can
 keep selected rootfs data outside app-private storage — surviving
 uninstall and visible to other Android apps. Example: shared storage
-(`/storage/emulated/0`) bound at `/home/android`.
+(`/storage/emulated/0`) mounted at `/mnt/android`.
 
 Tawcroot-only: the bind list rides the same `-b src:dst` table as the
 built-in system/share binds (path rewrites, not kernel mounts — so
@@ -26,11 +26,12 @@ settings toggle. Two independent runtime gates in
 
 - `declared(context)` — the permission is in the APK manifest at all.
   `-PtawcAllFilesAccess=false` strips it at build time via the
-  build-type manifest overlay `app/src/overlays/no-all-files-access/`
-  (Google Play treats the permission as sensitive and only allows
-  qualifying core use cases; sideload/F-Droid builds keep it). All
-  binds UI hides itself when false; nothing else changes, so the same
-  code ships both ways.
+  build-type manifest overlay `app/src/overlays/no-all-files-access/`.
+  The flag was added for a distribution channel that treats the
+  permission as sensitive; there is no such channel now (releases are
+  GitHub assets only), so it stands as a build option for anyone who
+  would rather not ship a broad permission. All binds UI hides itself
+  when false; nothing else changes, so the same code ships both ways.
 - `granted()` — `Environment.isExternalStorageManager()`. The
   manage-binds screen deep-links to the settings toggle
   (`openSettings`).
@@ -94,22 +95,90 @@ install form warns (grant / install anyway) when the pending binds need
 a grant that's missing, since the fail-closed error would otherwise hit
 mid-install.
 
+One caller fills that list without the user touching a binds screen:
+`MainActivity`'s all-files-access card carries a "bind shared storage
+automatically" toggle, and both of its install buttons (one-tap and
+import-a-pack) go through the same `launchInstall`, so both pick it up.
+Three states, stored as one nullable pref: `null` (never touched)
+follows the grant — granted means the toggle reads as on, which is the
+auto-tick the card exists for — while an explicit `true`/`false` is
+the user's own call and is never overwritten by a later grant change.
+The toggle renders only when the grant is already held: it maps shared
+storage, which is fail-closed, so on a build without the grant setting
+it would only produce installs that refuse to start.
+
+What it adds is `AllFilesAccess.sharedStorageBinds()` — i.e. the
+shared-storage half, deliberately **not** the Android-root bind. The
+card's own wording is about shared storage ("read your Downloads,
+Pictures, …"), and handing over a read-only view of the whole Android
+filesystem as a side effect of that sentence would grant more than the
+sentence asked for. The root bind stays available as a one-tap
+suggestion, and both halves are editable afterwards under container
+management.
+
+The custom install form is the other entry point, and it *seeds* rather
+than decides: a form opened fresh (not restored from a rotation) with an
+empty list starts from the same toggle, so ticking the box on the setup
+screen and then walking into the form doesn't quietly produce an
+unmapped container. It is evaluated once, at `onCreate`, and only when
+the list is empty — from then on the list is the user's, and clearing it
+in `ManageBindsActivity` has to stay cleared (the rotation path goes
+through `KEY_BINDS` instead, which is what keeps an emptied list empty).
+While the list is still the seeded one the row says so
+(`install_external_binds_auto_label`); the first trip through Manage
+clears that flag, so the label can't outlive the provenance it claims.
+Unlike MainActivity's card the form keeps *seeding* regardless of the grant —
+its grant dialog already covers the fail-closed case, and hiding the
+seeding would recreate the very disagreement this removes.
+
 ## UI
 
+- `MainActivity`'s setup screen carries the grant card too, and that
+  is deliberately the *first* place it appears: the binds screens
+  below are reachable only from the custom install form or from an
+  existing install's container management, i.e. only for a user who
+  already knew to go looking — while the one-tap install is exactly
+  the path that never mentions the permission. The card asks for the
+  grant and, once held, offers the automatic-bind toggle described
+  under *Install-time binds* above; hides
+  itself entirely on a build that doesn't declare the permission, and
+  is re-rendered from `onResume` because `render()` rebuilds only on a
+  screen *change* — without that, returning from the system toggle
+  would keep showing "not granted".
 - `ManageBindsActivity` — add/edit/remove. Read-only binds show a
   "Read-only" badge on their card; the flag is edited only via the
   add/edit dialog's checkbox. `AllFilesAccess.
-  commonDirBinds()` is the suggested set: `/android` ⇐ `/` (the Android
-  root; much of it unreadable to the app uid — expected; read-only by
-  default, it's browse-only), `/home/android` ⇐ shared storage, and the
+  commonDirBinds()` is the suggested set: `/android_root` ⇐ `/` (the
+  Android root; much of it unreadable to the app uid — expected;
+  read-only by default, it's browse-only), `/mnt/android` ⇐ shared
+  storage, and the
   shared-storage folders with
   a standard name on both sides (Download→`/root/Downloads`, Documents,
   Pictures, Music, Movies→`/root/Videos`, plus non-XDG DCIM; all
-  writable by default — they exist to be saved into). Unbound
-  common dirs (matched by guest path, skipping host dirs that
-  verifiably don't exist) render below the active binds as suggestion
-  cards with a one-tap accent Add that carries the suggestion's
-  default RO-ness (flagged on the card). A typed guest path may start
+  writable by default — they exist to be saved into). The convention the
+  two halves express: **your own folders live in your home; the phone's
+  storage is a mount** — hence `/root/...` for the per-directory binds
+  and `/mnt/...` for the wholesale one. `/home/android` was the earlier
+  default and was wrong twice over: it named a home for a user that
+  doesn't exist (the in-rootfs user is root, home `/root`), and the guest
+  path is persisted per install, so changing it is a defaults-only change
+  — an install bound at the old path keeps it. The root bind's guest name
+  is `/android_root` rather than bare `/android` for the same
+  "read it as the wrong thing" reason: `/android` parses as *the Android
+  side's storage*, which is what `/mnt/android` already is, whereas this
+  is the whole Android filesystem.
+  Unbound common dirs (suppressed when **either** the guest path or the
+  host path is already bound — the host half is what stops a pre-existing
+  `/home/android` install from being offered `/mnt/android` as a second
+  exposure of the same directory, and the guest half what stops an
+  Add that `validate` would reject on tap; host dirs that verifiably
+  don't exist are skipped too) render below the active binds as
+  suggestion cards with a one-tap accent Add that carries the
+  suggestion's default RO-ness (flagged on the card). Suggestion cards
+  show both ends of the pair, exactly as an active bind's card does —
+  which Android directory a suggestion would expose is the half worth
+  reading before tapping Add (`/android_root` ⇐ `/` hands over the whole
+  Android root). A typed guest path may start
   with `~`/`~/`; the save handler expands it to `RootfsEnv.GUEST_HOME`
   (`/root`) so persisted binds stay absolute. Two modes: editing an
   existing install's metadata (from `DistroInfoActivity`, gated to

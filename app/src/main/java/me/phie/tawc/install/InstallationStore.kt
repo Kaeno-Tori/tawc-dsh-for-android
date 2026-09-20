@@ -2,6 +2,10 @@ package me.phie.tawc.install
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import me.phie.tawc.AppPaths
 import me.phie.tawc.install.util.atomicWriteText
 import java.io.File
@@ -142,6 +146,7 @@ class InstallationStore(context: Context) {
             installationDir(installation.id).mkdirs()
             atomicWriteText(metadataFile(installation.id), installation.toJson())
         }
+        revision.update { it + 1 }
     }
 
     /**
@@ -253,6 +258,31 @@ class InstallationStore(context: Context) {
 
     companion object {
         private const val TAG = "tawc"
+
+        /**
+         * Bumped on every [save]. The store is plain files with no
+         * observable surface of its own, so a screen that renders it has
+         * to be told when to re-read.
+         *
+         * [me.phie.tawc.MainActivity] was hanging off
+         * [me.phie.tawc.ops.OperationsRegistry] alone, which fires when
+         * the service registers an op — but the service registers *before*
+         * its worker writes the `INSTALLING` record. So the render that
+         * followed the register still read a store that said "no
+         * container", and the state write that came next had nobody
+         * listening: tapping Install left the setup screen up until the
+         * Activity happened to be resumed. The same missing signal meant
+         * a finished install couldn't be recognised as the
+         * `INSTALLING → READY` *transition* the completion summary keys
+         * off — the receipt would never show at all.
+         *
+         * Process-global for the same reason as [locks]: instances are
+         * constructed ad-hoc wherever metadata is touched.
+         */
+        private val revision = MutableStateFlow(0)
+
+        /** Emits on every metadata write. See [revision]. */
+        val changes: StateFlow<Int> = revision.asStateFlow()
 
         // Per-id write locks. InstallationStore is constructed ad-hoc
         // wherever metadata is touched, so the locks must be process-

@@ -40,7 +40,11 @@ object ChrootMounter {
      * `ROOTFS`, `MOUNTS`, `is_mounted`, and `mount_if_needed` defined for
      * the rest of the script to use.
      */
-    fun mountScript(rootfs: String, tawcShare: String, andoHostDir: String? = null): String {
+    fun mountScript(
+        rootfs: String,
+        tawcShare: String,
+        andoHostDir: String? = null,
+    ): String {
         val emulator = isEmulator
         val guestShare = TawcrootMethod.GUEST_TAWC_SHARE_DIR
 
@@ -108,37 +112,16 @@ object ChrootMounter {
 
         sb.appendLine(
             """
-            # Expose JUST the compositor's `share/` subdir at
-            # /usr/share/tawc inside the chroot — the wayland socket
-            # and Xwayland's xtmp dir live there. Deliberately not the
+            # Expose JUST the app's `share/` subdir at
+            # /usr/share/tawc inside the chroot. Deliberately not the
             # whole <appData> tree (which would expose libhybris's
             # asset extract, the proot scratch dir, and everything
             # else under <filesDir> to in-rootfs writes — see
-            # notes/installation.md "/usr/share/tawc"). RootfsEnv
-            # points WAYLAND_DISPLAY at the in-rootfs path; no
-            # /tmp/wayland-0 symlink needed. mkdir the source first
-            # so the bind succeeds even on a fresh device before the
-            # compositor has run.
+            # notes/installation.md "/usr/share/tawc"). mkdir the
+            # source first so the bind succeeds on a fresh device.
             mkdir -p "$tawcShare"
             mkdir -p "${'$'}ROOTFS$guestShare"
             mount_if_needed "$tawcShare" "${'$'}ROOTFS$guestShare"
-            """.trimIndent()
-        )
-        sb.appendLine(
-            """
-            # XWayland: the bionic-built Xwayland binary on the Android
-            # side opens its X11 listening socket at
-            # <appData>/share/xtmp/.X11-unix/X<n> (because Android has
-            # no /tmp). Bind that into the chroot so X clients see it
-            # at the standard /tmp/.X11-unix path. libxcb hardcodes
-            # /tmp/.X11-unix/X<N> for the `:N` form of DISPLAY, so
-            # we can't just expose it via /usr/share/tawc. mkdir the
-            # source before binding so the mount succeeds even before
-            # the compositor has launched Xwayland (install steps,
-            # tests).
-            mkdir -p "$tawcShare/xtmp/.X11-unix"
-            mkdir -p "${'$'}ROOTFS/tmp/.X11-unix"
-            mount_if_needed "$tawcShare/xtmp/.X11-unix" "${'$'}ROOTFS/tmp/.X11-unix"
             """.trimIndent()
         )
         if (andoHostDir != null) {

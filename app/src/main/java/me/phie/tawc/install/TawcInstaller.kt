@@ -5,7 +5,6 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import me.phie.tawc.compositor.CompositorService
 import java.io.File
 import java.io.IOException
 
@@ -24,14 +23,14 @@ import java.io.IOException
  *  - Records the manifest in [Installation.tawcInstalls] alongside
  *    a [Installation.tawcStamp] tag.
  *
- * Whole app-owned dirs (`/usr/lib/{hybris,mesa-zink,gfxstream}`) are
- * NOT copied under [TawcrootMethod] — [TawcrootMethod.assetBinds]
+ * Whole app-owned dirs (`/usr/lib/{hybris,turnip}`)
+ * are NOT copied under [TawcrootMethod] — [TawcrootMethod.assetBinds]
  * binds them in read-only instead, so a tawcroot manifest holds only
  * the files that must coexist with distro-managed siblings (plus
  * ando / bashrc). proot and chroot still get full copies. See
  * notes/installation.md "Copy vs bind".
  *
- * The stamp is whatever [CompositorService.currentExtractStamp]
+ * The stamp is whatever [TawcAssets.currentExtractStamp]
  * returns — a `versionCode + lastUpdateTime` pair that bumps on every
  * `adb install -r` (so dev iteration triggers re-installs cleanly,
  * not just version-code bumps).
@@ -55,8 +54,7 @@ internal object TawcInstaller {
      *  for correctness — but keep it stable so logs read consistently. */
     private val providers: List<TawcInstallProvider> = listOf(
         LibhybrisInstallProvider,
-        BridgeInstallProvider,
-        MesaZinkInstallProvider,
+        TurnipInstallProvider,
         AndoInstallProvider,
         ShellDefaultsInstallProvider,
     )
@@ -64,7 +62,7 @@ internal object TawcInstaller {
     /**
      * Make the rootfs at [Installation.id] match the current app
      * version's tawc-installed file set. No-op when
-     * `installation.tawcStamp == CompositorService.currentExtractStamp`.
+     * `installation.tawcStamp == TawcAssets.currentExtractStamp`.
      * Otherwise:
      *
      *   1. Walk the recorded [Installation.tawcInstalls] manifest and
@@ -107,7 +105,7 @@ internal object TawcInstaller {
             log("tawc-installer: $id rootfs missing at $rootfs — skipping")
             return
         }
-        val currentStamp = CompositorService.currentExtractStamp(context)
+        val currentStamp = TawcAssets.currentExtractStamp(context)
         if (installation.tawcStamp == currentStamp) {
             // Up to date — no work, no log spam (this fires on every
             // app start in the steady state).

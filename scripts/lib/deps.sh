@@ -230,7 +230,7 @@ _dep_tree_state_one() {
 
 # deps_tree_state <name|dest-prefix/>... -- fingerprint one line per
 # dep. An arg ending in "/" selects every dep whose manifest dest
-# starts with that prefix (e.g. "deps/xwayland-src/"), so callers don't
+# starts with that prefix (e.g. "deps/termux-app/"), so callers don't
 # hardcode a list that drifts when a dep is added. Never clones,
 # verifies, or takes the lock.
 deps_tree_state() {
@@ -360,8 +360,8 @@ dep_reset() {
 }
 
 # ---------------------------------------------------------------------------
-# Tarball deps. A handful of deps ship as release tarballs rather than git
-# repos (libmd, talloc); their version lives in the fetching script's URL,
+# Tarball deps. Some deps ship as release tarballs rather than git
+# repos (talloc); their version lives in the fetching script's URL,
 # not deps.list. Download them through this so the bytes are pinned by
 # hash the way git deps are pinned by commit.
 #

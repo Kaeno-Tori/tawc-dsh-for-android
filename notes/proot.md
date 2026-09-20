@@ -13,17 +13,18 @@ methods"). proot remains in debug builds for performance comparisons
 and as a fallback during tawcroot bring-up — it is not exposed to
 release users. chroot is in the same boat (see [notes/chroot.md](chroot.md)).
 
-libhybris-driven GPU acceleration works under proot too: `ProotMethod`
+libhybris-driven GPU access works under proot too: `ProotMethod`
 binds `/apex /vendor /system /system_ext` into the
 rootfs view (mirroring `ChrootMounter.mountScript`'s mount set),
 plus the per-spawn linker-config copy every method does
 (see [notes/installation.md](installation.md) "The bionic linker config"),
 and `TawcInstaller`/`LibhybrisInstallProvider` copies the libhybris
 tree into both methods' rootfses (real files at `/usr/lib/hybris/`,
-not symlinks). EGL, GLES, and
-Vulkan all reach the Android driver under proot. Firefox works too,
-modulo two extra setup steps the proot path applies automatically
-(see "Firefox under proot" below).
+not symlinks). That access is compute-only, as everywhere in this
+fork — there is no display output path — so what reaches the Android
+blob under proot is libhybris's Vulkan, not a rendering stack. The
+Firefox-era shm/sandbox setup the proot path still applies is
+covered under "Firefox under proot" below.
 
 ## What we ship
 
@@ -89,7 +90,7 @@ takes ~7 minutes wall time on the x86_64 emulator (~3-4 min for
 download, the rest pacman). Most of that is `pacman -Syu` extracting
 package contents, which is exactly the syscall-heavy case. Once
 installed, runtime cost is much smaller — long-running CPU/GPU work
-in the Wayland clients themselves doesn't trip the tracer.
+in the guest program itself doesn't trip the tracer.
 
 A friend's idea for a faster proot replacement is in the air. If/when
 that lands, this whole story collapses to "swap one ptrace tool for
@@ -98,11 +99,12 @@ in mind.
 
 ## Firefox under proot
 
-Two extras are needed to make Firefox start AND render through the
+Two extras were added to make Firefox start AND render through the
 libhybris/AHB path under the `runas_app` SELinux domain (without
-these the app either crashes during init or paints every chrome
-frame through cairo/SHM, which the compositor magenta-tints to
-make obvious):
+these it either crashed during init or painted every chrome
+frame through cairo/SHM, which the compositor magenta-tinted to
+make obvious). That rendering path is gone with the display stack,
+but `ProotMethod` still applies both, so they stay documented here:
 
 1. **`/dev/shm` bind**. Android has no `/dev/shm` and `runas_app`
    can't create one in the host `/dev` (which proot bind-passes
@@ -191,7 +193,7 @@ The full list of things Android does differently that we paper over:
    than now — answers 304. pacman keeps the bootstrap's possibly
    stale DB and 404s on packages the mirror has rolled past
    (observed: `mesa-1:26.0.4-1` no longer at any ALARM mirror after
-   it rolled to `26.0.5`). `ArchPacmanCommon.installBasePackages`
+   it rolled to `26.0.5`). `ArchPacmanCommon.installPackages`
    uses `-Syyu` to short-circuit the conditional GET and download
    the current DB unconditionally.
 

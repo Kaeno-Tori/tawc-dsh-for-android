@@ -159,7 +159,8 @@ validation; syscall behaviour still needs the phone).
 
 On the `.tawctarget` phone through the cache proxy: full
 packages-flavor ALARM install; `pacman -Qkk` spot checks clean;
-`pacman -S` something small works; lxterminal launches; the ALARM
+`pacman -S` something small works and the installed binary runs (no GUI
+program can be used as the acceptance check any more); the ALARM
 *tarball* flavor still installs unchanged; failed-install uninstall
 reaps `bootstrap-work/`. Note the size delta vs the tarball install in
 the commit message — it is the headline.

@@ -8,4 +8,19 @@
      replacing them with another integrity barrier. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
+
+    <!-- The one intentional carve-out, and it is not a weakening of the
+         rule above: loopback traffic never reaches a network, so there is
+         no path to intercept and no certificate to verify — the threat
+         "Bootstrap integrity" is about simply does not exist here.
+
+         The DSH harness serves its browser UI on 127.0.0.1:<port> over
+         plain HTTP (there is no TLS story for a loopback-only server, and
+         minting a cert for it would be security theatre). Without this
+         entry the WebView fails the load with ERR_CLEARTEXT_NOT_PERMITTED
+         and the interface never appears. See TAWC_DSH_DESIGN.md §6.2. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
 </network-security-config>

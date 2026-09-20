@@ -45,8 +45,9 @@ method is enabled, and any APK that doesn't ship proot drops
 `libproot.so` / `libproot-loader.so` at packaging time.
 
 Distros are not build-gated the same way: every build ships all of
-them, but the install form splits them into the two supported ones
-and an "Other distros" expander (`Distro.supported`, see
+them, and every entry in `DistroRegistry.all` is user-supported, so
+the install form offers them as a flat list — there is no
+supported/other split any more (see
 [distro-options.md](distro-options.md) → *Which distros are
 supported*).
 
@@ -57,7 +58,7 @@ Everything lives under the app's private data dir:
     /data/data/me.phie.tawc/
       cache/install/                 # owned by BootstrapCache (see below):
       cache/install/bootstrap-<cacheKey>.tar.zst    # canonical Arch x86_64 bootstrap (7-day TTL); cacheKey="arch-x86_64"
-      cache/install/bootstrap-<cacheKey>.tar.gz     # canonical ALARM / Manjaro / Debian bootstrap (7-day TTL); cacheKey="arch-aarch64" / "manjaro-aarch64" / "debian-sid-aarch64"
+      cache/install/bootstrap-<cacheKey>.tar.gz     # canonical ALARM / Debian bootstrap (7-day TTL); cacheKey="arch-aarch64" / "debian-sid-aarch64"
       cache/install/bootstrap-<cacheKey>.tar.fifo                 # transient zstd→tar streaming pipe (Archive owns lifecycle; sweep evicts unconditionally)
       cache/install/bootstrap-<cacheKey>.tar.{zst,gz}.part        # transient Downloader in-flight file (sweep evicts unconditionally)
       distros/
@@ -68,7 +69,7 @@ Everything lives under the app's private data dir:
 The on-disk layout, the [Installation] data class, and
 [InstallationStore] already handle multiple installs side-by-side; the
 id is whatever the InstallActivity intent's `--es id <id>` extra (or
-the home-screen install form's slugified label) supplied.
+the install form's slugified label) supplied.
 
 ## State machine
 
@@ -118,7 +119,7 @@ CORRUPT is a pseudo-state, never written to disk: when
 `InstallationStore.list()`/`load()` return a synthetic marker record
 (`Installation.corruptMarker`, id from the directory name, `failure`
 = the parse error) instead of dropping the slot. The UI renders it
-like FAILED (visible card, size probe, Delete; no run/launcher), and
+like FAILED (visible card, size probe, Delete; no run action), and
 the store refuses to write through it — `update()` no-ops and
 `save()` throws on a CORRUPT record — so the unparseable file stays
 byte-identical for manual recovery until the user uninstalls.
@@ -212,6 +213,17 @@ be cleared by uninstalling the half-installed (or half-uninstalled)
 remains. There is intentionally no "resume" or "repair" — the only
 recovery is uninstall + install.
 
+`MainActivity` presents that pair as two actions, and both of them
+uninstall — the difference is only what happens next. *Start over*
+relaunches the same request once the slot is gone, which is the right
+answer for a transient failure (dead mirror, interrupted download).
+*Back to setup* deliberately relaunches nothing, so the user lands on
+the picker and can choose a different distro, method or pack. It exists
+because repeating the failed request was previously the only offer, so
+a failure caused by the request itself (a distro whose mirror is
+blocked, a method this device can't run, the wrong pack) had no way out
+from that screen.
+
 ## Code layout (`me.phie.tawc.install`)
 
 The package is split into three layers:
@@ -227,55 +239,52 @@ The package is split into three layers:
 | `Su.kt`                        | Wrapper around Magisk `su`. Pipes the script via stdin (no shell-quoting headaches), streams combined stdout/stderr line-by-line via a callback. |
 | `Downloader.kt`                | HTTP downloader for bootstrap tarballs. Caches by content length. |
 | `SignatureVerifier.kt`         | Sealed `BootstrapVerification` (`ResolvedAtInstallTime` / `Pgp` / `Sha256`) and `verify(...)`. Called from [Installer] between download and extract — see *Bootstrap integrity* below. Uses BouncyCastle (`bcpg-jdk18on` + `bcprov-jdk18on`) for the OpenPGP layer. Treat as load-bearing security code. |
-| `Minisign.kt`                  | Minisign/signify (Ed25519, plain `Ed` and BLAKE2b-512-prehashed `ED`) detached-signature parsing + verification, on BouncyCastle's low-level `Ed25519Signer` / `Blake2bDigest`. Used by [VoidSha256Resolver] to authenticate Void's `sha256sum.txt` before any digest is read out of it. Also load-bearing security code. |
 | `BootstrapCache.kt`            | Sole owner of `<cacheDir>/install/`. `download(arch, url, format, …)` is the single entry point: it mkdirs, fetches via [Downloader], and refreshes the file's mtime so the TTL counts from "last used" rather than "first downloaded". Also exposes `tempFifoFor(arch)` for [Archive]'s zstd→tar streaming FIFO so the transient lives in the cache dir under one owner. `sweepStale` runs a two-pass janitor: TTL eviction (7 days) for canonical `bootstrap-<cacheKey>.tar.{zst,gz}`; unconditional deletion of `*.fifo`, legacy `*.tmp`, `*.part` (transients are never valid across processes), and the legacy `*.md5.verified` sidecar left by pre-PGP ALARM installs. Also defines the `BootstrapFormat` enum. |
 | `Archive.kt`                   | Tar extraction. Plain `.tar` / `.tar.gz` get handed to `toybox tar` directly; `.tar.zst` is streamed in-process through a named pipe (`bootstrap-<cacheKey>.tar.fifo`) so the ~700 MB plaintext never lands on disk. Never wipes — install only runs against an empty slot. |
+| `TawcAssets.kt`                | Extraction of the APK-shipped GPU assets (`assets/libhybris/<abi>.tar` → `<filesDir>/libhybris/`, `assets/turnip/<abi>/*` → `<filesDir>/turnip/`) plus the `.version` stamp that gates re-extraction (`currentExtractStamp` = `versionCode + lastUpdateTime`). Called per spawn by [TawcrootMethod.assetBinds] and by [TawcInstaller] on install / APK upgrade. Display-free by design — the logic came from `CompositorService`'s companion object, which the display-stack removal deleted. |
 | `RootfsCleaner.kt`             | The one and only delete path, for every install method: kill guest processes → unmount (chroot only) → refuse if any mount remains under the install dir → two-pass `find -xdev -depth -delete` (su-first for chroot, app-uid with one su retry otherwise). The chroot-only facts come from the metadata-recorded method key, not a live `InstallationMethod`, so disabled-method slots still wipe correctly. Used by uninstall; never by install. `RootfsCleanerTripwireTest` fails on recursive deletes elsewhere in the app sources. |
 | `RootfsTmpSweeper.kt`          | Age-based sweep (3 days, lstat mtimes, never follows symlinks, skips `/tmp/.X11-unix`) of every install's `<rootfs>/tmp`, run from `TawcApplication`'s startup thread — see *Rootfs /tmp sweep* below. |
 | `ChrootMounter.kt`             | Builds the bind-mount shell snippet (`mountScript`) used by [ChrootMethod.startInside], and provides defensive-cleanup `unmount` (used by [RootfsCleaner]). Mounts live inside a single `su` invocation's private namespace, not globally. |
-| `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → distro.initPackageManager → distro.installBasePackages → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
-| `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix/verification), `cacheKey`, `basePackages`, the three policy hooks (`configure`, `initPackageManager`, `installBasePackages`), and `resolveBootstrap()` for distros with install-time URL/digest lookup (Manjaro/Void/Debian). Also defines `DistroBootstrap`. |
-| `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro], `Build.SUPPORTED_ABIS` → installable [Distro] list, and the install activity's distro radio key → [Distro]. `availableForHost()` (supported-first) / `supportedForHost()` / `otherForHost()` / `defaultForHost()` / `forKey()`. |
-| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch / Manjaro flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
+| `Installer.kt`                 | Generic install/uninstall orchestrator. Drives `setState(INSTALLING) → BootstrapCache.download → Archive.extractAsRoot → distro.configure → Localization.configure → distro.initPackageManager → distro.installPackages(basePackages) → NodeProvisioner.install (not for a pack) → setState(READY)`. Distro-agnostic; per-distro behaviour comes from the [Distro] passed in. |
+| `distro/Distro.kt`             | Interface for a (distro × Linux arch). Owns `bootstrap` (URL/format/stripPrefix/verification), `cacheKey`, `basePackages`, `runtimePackages`, the three policy hooks (`configure`, `initPackageManager`, `installPackages`), and `resolveBootstrap()` for distros with install-time URL/digest lookup (Debian). Also defines `DistroBootstrap`. |
+| `Localization.kt`              | Device locale (`/etc/locale.conf`) + timezone (`/etc/localtime` symlink) written into every rootfs at configure time, and the same two values into [RootfsEnv.kt] on every spawn. Owns the `TZ` shape guard (`GMT+08:00` would be POSIX-parsed with the sign inverted). |
+| `NodeProvisioner.kt`           | Stage 8: the Node runtime + npm (via the distro's package manager), then DSH and pnpm (via npm). Owns the `NpmRegistries` candidate list and the pinned DSH version. |
+| `distro/DistroRegistry.kt`     | The only place that maps `(metadata.distro, metadata.arch)` → [Distro], `Build.SUPPORTED_ABIS` → installable [Distro] list, and the install activity's distro radio key → [Distro]. `availableForHost()` / `defaultForHost()` / `forKey()` / `forInstallation()` / `displayLabel()`. |
+| `distro/arch/ArchPacmanCommon.kt` | Helpers shared by every Arch flavour: pacman.conf munging (SigLevel/DisableSandbox/CheckSpace/IgnorePkg), mirrorlist write, the `pacman-key --init` boilerplate, and `pacman -Syu` / `pacman -S --needed`. Also exports the canonical `DEFAULT_BASE_PACKAGES` list. |
 | `distro/arch/ArchLinuxX86_64.kt` | Arch Linux x86_64 (`pkgbuild.com` zstd bootstrap, `archlinux` keyring, geo-redirector mirrorlist). |
 | `distro/arch/ArchLinuxArm.kt`  | Arch Linux ARM aarch64 (`archlinuxarm.org` gzip bootstrap, `archlinuxarm` keyring, curated multi-mirror list — see *ALARM mirror failover* below). |
-| `distro/manjaro/GitHubReleaseResolver.kt` | Tiny `api.github.com /releases/latest` client. Returns `(browser_download_url, sha256)` for a named asset by reading the API response's `digest` field. |
-| `distro/manjaro/ManjaroArm.kt` | Manjaro ARM aarch64 (`manjaro-arm/rootfs` GitHub release gz; `archlinuxarm manjaro manjaro-arm` keyring set). `resolveBootstrap` does the GitHub-API lookup at install time so we always pull the latest weekly tag with a verifiable SHA-256. |
-| `distro/voidlinux/VoidCommon.kt` | Shared helpers for the two Void Linux flavours. `xbps-install -Suy xbps` then `xbps-install -uy` for the keyring/sync stage, followed by `xbps-install -y <packages>`. RSA package signatures are verified against the keys shipped in the bootstrap under `/var/db/xbps/keys/`. |
-| `distro/voidlinux/VoidSha256Resolver.kt` | Fetches `sha256sum.txt` from `repo-default.voidlinux.org/live/current/` over HTTPS at install time, verifies its `sha256sum.sig` minisign signature against the release key for the image date ([Minisign] + [VoidReleaseKeys]), then parses out the latest `void-<arch>-ROOTFS-YYYYMMDD.tar.xz` filename + SHA-256 and hands them to the installer as a [BootstrapVerification.Sha256]. Fails closed if the signature is missing, bad, or no key for the image date can be obtained. |
-| `distro/voidlinux/VoidReleaseKeys.kt` | Void's per-image-date minisign release public keys, bundled verbatim from `srcpkgs/void-release-keys/files/` in void-linux/void-packages, plus the `raw.githubusercontent.com` URL used to fetch a key for an image date newer than this APK. |
-| `distro/voidlinux/VoidLinuxX86_64.kt` | Void Linux x86_64 (glibc). Bootstrap is the dated `tar.xz` ROOTFS published under `live/current/`. |
-| `distro/voidlinux/VoidLinuxAarch64.kt` | Void Linux aarch64 (glibc). Same flow as the x86_64 flavour, different bootstrap URL and ABI. |
 | `distro/apt/AptCommon.kt`      | Shared apt-family helpers: deb822 sources, apt.conf, dpkg `path-exclude`, apt-family `/etc/profile.d/tawc.sh`, shell-default stubs, `apt-get update`, `apt-get dist-upgrade`, and base package install. |
 | `distro/debian/DebianDockerResolver.kt` | Pins the debuerreotype `dist-amd64` / `dist-arm64v8` branch tip to a commit SHA via the GitHub API, then fetches the OCI manifest at that commit and returns the `rootfs.tar.gz` URL plus layer SHA-256 — manifest and tarball are guaranteed to come from one tree state. |
 | `distro/debian/DebianSid.kt`   | Debian sid x86_64 / aarch64. Suite-driven apt-family implementation; future Debian suites should mostly be additional data objects. |
 | `util/HostArch.kt`             | `primaryAbi()` and `linuxArchFor(abi)` — the only place that knows the Android ABI ↔ Linux `uname -m` mapping. |
 | `util/HumanSize.kt`            | Byte-count → "1.2 MiB" formatter for download progress. |
 | `util/AppOwnership.kt`         | `chownAppDirNonRecursive` — resets a freshly-mkdir'd dir to app uid:gid so subsequent app-uid writes succeed. |
-| `InstallProgress.kt`           | Stage enum + progress event used by the service. The pkg-manager-bootstrap stages are `PKG_KEYRING` and `PKG_INSTALL` (distro-agnostic names). |
+| `InstallProgress.kt`           | Stage enum + progress event used by the service. The pkg-manager-bootstrap stages are `PKG_KEYRING` and `PKG_INSTALL` (distro-agnostic names); `PROVISIONING` is the Node/DSH step after them. |
 | `InstallationService.kt`       | The state-machine gate. Foreground service that consults [InstallationStore], resolves the right [Distro] from [DistroRegistry], and exposes `progress` (StateFlow) + `log` (SharedFlow). |
 | `InstallProgress.kt`'s `toOperationProgress` | Maps the install-specific `InstallStage` enum onto the generic `OperationStage`. Used by [InstallationService.publishProgress] when calling `op.publish(...)` on the per-job [me.phie.tawc.ops.MutableOperation]. |
 | `InstallActions.kt`            | Broker action handlers (`install` / `uninstall`) registered from [TawcApplication.onCreate] (debug builds only). Validate args, call [InstallationService] companion-object helpers, open [LogScreenActivity] best-effort, and mirror the registered Operation's flows back to the broker socket until terminal. Host disconnect → `Operation.cancel()`. See `notes/exec-broker.md` for protocol. |
 | `InstallActivity.kt`           | Install form (distro radio, free-form Label EditText with live slug-derived id hint, vertical method radio in `tawcroot (recommended) / proot / chroot (requires root)` order, "What's the difference?" link to [InstallMethodInfoActivity]) → Install button → calls [InstallationService.startInstall], opens [LogScreenActivity], and finishes itself. The Install button is disabled while the label is empty / unslugifiable / collides with an existing installation. The activity is `exported="false"` — there is no CLI launch path. |
 | `InstallMethodInfoActivity.kt` | Read-only reference page describing the three install methods (tawcroot / proot / chroot). Linked from the install form's "What's the difference?" affordance so users can compare tradeoffs without leaving the app. |
-| `DistroInfoActivity.kt`        | Per-distro detail page (id, label, registry-resolved distro/arch, method, source URL, installed-at, state/failure, full rootfs path) + an async `du -sk` size readout (only for `READY`) + a red Delete button (Are-You-Sure dialog → [InstallationService.startUninstall] + opens [LogScreenActivity]). The view is rebuilt in `onResume` so a returning trip from a cancelled uninstall (FAILED) refreshes the State row instead of showing the stale READY pre-uninstall snapshot. Reached from a tap on a home-screen row. |
+| `DistroInfoActivity.kt`        | Per-distro detail page (id, label, registry-resolved distro/arch, method, source URL, installed-at, state/failure, full rootfs path) + an async `du -sk` size readout (only for `READY`) + a red Delete button (Are-You-Sure dialog → [InstallationService.startUninstall] + opens [LogScreenActivity]). The view is rebuilt in `onResume` so a returning trip from a cancelled uninstall (FAILED) refreshes the State row instead of showing the stale READY pre-uninstall snapshot. Reached from the DSH surface's dock (the Container action). |
 
-The `MainActivity` home screen lists the on-disk installations
-(distro + arch only — size lives on [DistroInfoActivity] because
-`du -sk` over a multi-GB rootfs costs seconds via `su` and would slow
-down opening the launcher). Each row is tappable and opens the info
-page; the page itself hosts the Uninstall button.
+`MainActivity` is a single-container state machine, not a list: it
+renders whatever the one container's state calls for — setup, live
+install progress, the failure reason with its recovery actions, or a
+completion summary that hands off to the DSH surface (`DshActivity`).
+There are no per-install rows to tap. The Delete button and the size
+readout (`du -sk` over a multi-GB rootfs costs seconds via `su`)
+live on [DistroInfoActivity].
 
-The non-compositor activities (`MainActivity`, `InstallActivity`,
+The activities (`MainActivity`, `InstallActivity`,
 `DistroInfoActivity`, [LogScreenActivity]) extend `AppCompatActivity`
-and share a small `me.phie.tawc.ui.Scaffold` helper that builds a
-`MaterialToolbar` (with a back/up arrow on child screens) plus a
-content column. The theme is `Theme.Material3.DayNight.NoActionBar`
-with a warm orange `colorPrimary` (`@color/tawc_accent`) for primary
-buttons and `@color/tawc_danger` (red) for destructive ones; both have
-night-mode variants in `res/values-night/`. The compositor activity
-keeps the device-default theme — it draws its own surface and never
-inflates Material widgets.
+and share a small `me.phie.tawc.ui.Scaffold` helper that builds the
+app's header — a bare 44dp row with an optional back/up arrow on child
+screens, deliberately *not* a `MaterialToolbar` (see that file's header
+comment) — plus a content column. The theme is
+`Theme.Material3.DayNight.NoActionBar` with `@color/tawc_accent` as
+`colorPrimary` — DSH's near-black `#0F1115` in light mode, near-white
+`#F9FAFB` in `res/values-night/` — for primary buttons and
+`@color/tawc_danger` (red) for destructive ones.
 
 ## Install pipeline
 
@@ -317,8 +326,22 @@ replaces them and rejoins at stage 5.
      plus a `tawc-no-extract` block of `NoExtract` patterns — see *Slimming policy*
      below; **upstream `SigLevel` is left intact** — see *Bootstrap integrity* below)
    - `/etc/pacman.d/mirrorlist` (x86_64: geo-routed `geo.mirror.pkgbuild.com`; aarch64: HTTPS-first curated multi-mirror list — see *ALARM mirror failover* below)
+   - `Localization.configure` runs right after `distro.configure` and
+     writes the two device-specific files: `/etc/locale.conf` (`LANG=C.UTF-8`
+     — ALARM ships `LANG=C` there, and its own
+     `/etc/profile.d/locale.sh` reads that file *before* defaulting to
+     `C.UTF-8`, so the distro's own mechanism is the one to fix) and
+     `/etc/localtime` as a symlink into `/usr/share/zoneinfo` (a fresh
+     rootfs has none, so `date` reads UTC). Distro-agnostic and applied
+     to imported packs too: the zone and the charset are properties of
+     the device, not of the rootfs. The same two values ride in
+     [RootfsEnv.kt] on every spawn, which is the half that covers
+     non-login shells — measured, `env -i bash -c` gets `LANG`
+     *unset*, because the distro's login path is what reads the file —
+     and the half that is actually automatic, since `TZ` is re-read
+     from Android per spawn while the symlink is fixed at install time.
    - **Nothing under `/etc/profile.d/`.** PATH/TMPDIR/HOME and the
-     Wayland/GL/X11 env all come from [RootfsEnv.kt] via `/usr/bin/env
+     GPU-driver env all come from [RootfsEnv.kt] via `/usr/bin/env
      -i KEY=VAL …` on every spawn ([ChrootMethod], [ProotMethod],
      [TawcrootMethod]). No on-disk env state inside the rootfs that
      the app version would have to keep rewriting; env changes pick
@@ -332,10 +355,9 @@ replaces them and rejoins at stage 5.
      files as **real files** inside the rootfs, not symlinks. Same
      generic mechanism handles any future "ship file X into every
      rootfs" need. Providers see the install's method key, because the
-     three whole app-owned dirs — `/usr/lib/hybris/{*.so,gl-shims/,libhybris/}`
-     from `LibhybrisInstallProvider`, `/usr/lib/gfxstream/` from
-     [BridgeInstallProvider], `/usr/lib/mesa-zink/` from
-     [MesaZinkInstallProvider] (all tawc-owned namespaces;
+     two whole app-owned dirs — `/usr/lib/hybris/{*.so,gl-shims/,libhybris/}`
+     from `LibhybrisInstallProvider` and `/usr/lib/turnip/` from
+     `TurnipInstallProvider` (both tawc-owned namespaces;
      `/usr/local/lib/` stays free for the user's own installs) — are
      copied only under proot/chroot and RO-**bound** under tawcroot
      (see *Copy vs bind* below). `/usr/share/glvnd/egl_vendor.d/00_libhybris.json`
@@ -349,13 +371,15 @@ replaces them and rejoins at stage 5.
      writes during CONFIGURING; the user can remove that source line
      to opt out per-rootfs while the app-owned file stays updatable.
       `LD_LIBRARY_PATH` (set by [RootfsEnv]) is
-      `/usr/lib/hybris/gl-shims:/usr/lib/hybris`. The source tree at
-      `<filesDir>/libhybris/` is extracted from
-      `assets/libhybris/<abi>.tar` by `CompositorService.ensureLibhybris‐
-      Extracted` (called from both compositor service start and here).
+      `/usr/lib/hybris/gl-shims:/usr/lib/hybris` for the libhybris
+      backend and `/usr/lib/turnip` for Turnip. The source trees at
+      `<filesDir>/libhybris/` and `<filesDir>/turnip/` are extracted
+      by `TawcAssets.ensureLibhybrisExtracted` /
+      `TawcAssets.ensureTurnipExtracted` (called from
+      [TawcrootMethod.assetBinds] per spawn and from here).
      The set of files written into the rootfs is recorded in
      `metadata.json` (`tawcInstalls` array, `tawcStamp` matching
-     `CompositorService.currentExtractStamp`); `TawcInstaller` is
+     `TawcAssets.currentExtractStamp`); `TawcInstaller` is
      also called from `TawcApplication.onCreate` so an APK upgrade
      wipes the old set and re-copies fresh on first app start. See
      *Copy vs bind* below for the design call.
@@ -375,18 +399,30 @@ replaces them and rejoins at stage 5.
    shell that runs each chroot command, see *Mount lifecycle* below.)
 7. **PKG_INSTALL** — `pacman -Syyu --needed --noconfirm <basePackages>`
    followed by a package-cache clear (a `tawc` pacman hook drops the
-   cached `.pkg.tar.*`). The base set is deliberately **minimal**:
-   currently just `inetutils` (for `hostname`); see
-   `ArchPacmanCommon.DEFAULT_BASE_PACKAGES`. **No toolchain or desktop
-   stack is installed at bootstrap** — the guest ships without
-   `base-devel`/`gcc`/`make`, wayland, gtk, weston, autotools, etc.;
-   the user installs whatever they need afterwards with `pacman -S`.
+   cached `.pkg.tar.*`). `ArchPacmanCommon.DEFAULT_BASE_PACKAGES` is
+   `inetutils` (for `hostname`) plus the "can I actually work in here"
+   set: `git`, `less`, `nano`, `openssh`, `python`, `base-devel`. The
+   last two are the bulk of it; `nano` and `openssh` are there to put
+   back what the cruft purge below removes by size. Names are per-distro
+   (`python3`/`openssh-client`/`build-essential` on Debian) because a
+   wrong name fails the whole transaction rather than skipping one
+   package. **No display stack**: the compositor, Wayland and Xwayland
+   are gone from this fork, so a graphical stack (wayland, gtk, weston,
+   …) is neither shipped nor runnable here; extra command-line packages
+   are still the user's business, installed afterwards with `pacman -S`.
    The combined `-Syu --needed <pkgs>` form (rather than `-Syu`
    followed by `-S --needed`) avoids a version-skew window where the
    in-chroot DB is synced at T1 but the second `pacman` call at T2
    fetches a tarball the mirror has already rolled past. Every package
    is signature-verified against the keyring populated above.
-8. **(state write)** — `setState(READY)` only after every step above
+8. **PROVISIONING** — `NodeProvisioner`: install the distro's own
+   `runtimePackages` (the Node runtime + npm), then one `npm install -g`
+   for `@deepseek-ai/dsh@<pinned>` and `pnpm`. The npm registry is
+   chosen by the same probe the mirrors get (`MirrorProbe.orderSources`
+   over `NpmRegistries`), the candidates are walked on failure, and the
+   winner is left in `/root/.npmrc`. **Skipped for an imported pack**,
+   which is already provisioned. See `TAWC_DSH_DESIGN.md` §9.16.
+9. **(state write)** — `setState(READY)` only after every step above
    succeeds.
 
 The downloaded tarball persists in `cache/install/` across runs; the
@@ -528,16 +564,10 @@ path never touches mounts.
 
 ## /usr/share/tawc
 
-The compositor puts its Wayland socket at
-`<appData>/share/wayland-0` and Xwayland's `xtmp/.X11-unix/` listening
-socket dir at `<appData>/share/xtmp/.X11-unix/`. Each install method
-bind-mounts JUST `<appData>/share/` at `/usr/share/tawc` inside the
-rootfs (asymmetric bind on tawcroot/proot, real bind-mount on chroot).
-[RootfsEnv] exports `WAYLAND_DISPLAY=/usr/share/tawc/wayland-0` so
-wayland clients see the canonical in-rootfs path. Xwayland's X11
-sockets get an additional asymmetric bind from
-`<appData>/share/xtmp/.X11-unix` to `/tmp/.X11-unix`, since libxcb
-hardcodes `/tmp/.X11-unix/X<N>` for the `:N` form of `$DISPLAY`.
+Each install method bind-mounts JUST `<appData>/share/` at
+`/usr/share/tawc` inside the rootfs (asymmetric bind on
+tawcroot/proot, real bind-mount on chroot) — the single app-owned dir
+exposed to in-rootfs processes.
 
 We deliberately **don't** bind the whole `<appData>` tree the way an
 earlier version did — that exposed the libhybris asset extract
@@ -548,17 +578,17 @@ those would corrupt host state shared across rootfses (and tawcroot
 runs as the actual app uid, so file permissions don't help — the
 rootfs has the same uid as the bind src files). Limiting the bind to
 `<appData>/share/` keeps the cross-rootfs writable surface scoped to
-"things the compositor explicitly publishes for clients."
+the app-owned share dir.
 
 ## Copy vs bind
 
 App-shipped files inside the rootfs split two ways:
 
-- **Whole app-owned dirs** — `/usr/lib/hybris`, `/usr/lib/mesa-zink`,
-  `/usr/lib/gfxstream`, each a `<filesDir>` asset extract with no
-  distro-managed siblings. Under tawcroot these are **RO binds**
+- **Whole app-owned dirs** — `/usr/lib/hybris`, `/usr/lib/turnip`,
+  each a `<filesDir>` asset extract with no distro-managed siblings.
+  Under tawcroot these are **RO binds**
   (`TawcrootMethod.assetBinds`, `-b <filesDir>/<name>:<guest dir>:ro`).
-  Saves ~30 MB per arm64 install, drops the per-upgrade copy churn,
+  Drops the per-upgrade copy churn
   and makes the guest unable to corrupt its own GPU stack (writes get
   `EROFS`). proot and chroot still get copies — proot has no RO bind
   primitive.
@@ -587,23 +617,24 @@ Two properties decide which side a file lands on:
    rootfs clobbering them affects nothing else).
 
 Mechanics of the split: `TawcInstallProvider.entries(context,
-methodKey)` gets the install's `Installation.method`, and the three
-whole-dir providers return their tree only when the key isn't
-`tawcroot`. Every spawn surface resolves the method from install
-metadata, so a per-method manifest can't go stale via a cross-method
-entry. On the bind side, tawcroot opens each bind src at startup and
-`exit(93)`s if one is missing, while `TawcInstaller`'s stamp fast-path
-skips extraction — so `assetBinds` gates each bind on the matching
-`CompositorService.ensure*Extracted` call, per spawn (an asset probe
-plus a stamp read, noise next to forking a login shell). No asset for
-the ABI, or a build-disabled backend → the bind is simply omitted.
+methodKey)` gets the install's `Installation.method`, and the two
+whole-dir providers (libhybris, Turnip) return their tree only when
+the key isn't `tawcroot`. Every spawn surface resolves the method from
+install metadata, so a per-method manifest can't go stale via a
+cross-method entry. On the bind side, tawcroot opens each bind src at
+startup and `exit(93)`s if one is missing, while `TawcInstaller`'s
+stamp fast-path skips extraction — so `assetBinds` gates each bind on
+the matching `TawcAssets.ensure*Extracted` call, per spawn (an asset
+probe plus a stamp read, noise next to forking a login shell). No
+asset for the ABI, or a build-disabled backend → the bind is simply
+omitted.
 Two accepted consequences: the extract's `.version` stamp becomes
 guest-visible inside each bound dir, and guest writes into those dirs
 now fail `EROFS`.
 
 `TawcInstaller` records its copies in `Installation.tawcInstalls` (a
 list of `{src, dest, type=COPY|LINK}`) tagged with the
-`tawcStamp` from `CompositorService.currentExtractStamp(context)` —
+`tawcStamp` from `TawcAssets.currentExtractStamp(context)` —
 which combines `versionCode + lastUpdateTime` so every `adb install
 -r` triggers a refresh, not just real version bumps. On app start,
 `TawcApplication` calls `TawcInstaller.installAll` which walks every
@@ -615,12 +646,12 @@ the APK that introduced the tawcroot binds bumps the stamp, so the
 first refresh wipes the recorded whole-dir copies and records the
 smaller manifest; reverting bumps it again and re-lays full copies.
 
-Verified on arm64 hardware (OnePlus 9, Android 14): the whole libhybris
-integration module passes with `/usr/lib/hybris` bound RO — including
-the `/usr/lib/hybris-vulkan-only/libvulkan.so.1` manifest LINK, which
-resolves *through* the bind — and `00_libhybris.json` still coexists
+Verified on arm64 hardware (OnePlus 9, Android 14): with
+`/usr/lib/hybris` bound RO, the
+`/usr/lib/hybris-vulkan-only/libvulkan.so.1` manifest LINK resolves
+*through* the bind, and `00_libhybris.json` still coexists
 with the distro's `50_mesa.json`. Wiping `<filesDir>/{libhybris,
-mesa-zink,mesa-gfxstream}` under a stopped app is self-healing: the
+turnip}` under a stopped app is self-healing: the
 next spawn re-extracts from the `assetBinds` gate instead of hitting
 tawcroot's `exit(93)`.
 
@@ -704,10 +735,8 @@ Verified 2026-08-10 on the OnePlus 9 (Android 14, which ships no
 `/system/etc/ld.config.<arch>.txt` at all — `/linkerconfig` really is
 the only source there) and on the x86_64 emulator: `ls -l /` exits 0
 with no `linkerconfig` row under all three methods, the copy matches
-the host file byte-count, `weston-simple-egl` under `HYBRIS_LD_DEBUG=1`
-prints the read of the new path, and the whole libhybris integration
-module (EGL / Vulkan / GTK / Firefox / SuperTuxKart hardware-buffer
-smokes) still passes.
+the host file byte-count, and the `linker_config` integration suite
+still passes.
 
 ## CLI command interface
 
@@ -748,12 +777,14 @@ scripts/tawc-exec.sh --foreground-app --action install \
     --arg id=arch \
     --arg mirrorProxy=http://127.0.0.1:8080/proxy/
 
-# Or pick a different distro / pass extras forwarded as broker --arg
-# flags:
+# Or pass extras forwarded as broker --arg flags. `distro` takes a
+# DistroRegistry key — `arch` (Arch Linux ARM on arm64) or `debian-sid`;
+# it used to read `archlinuxarm`, which no longer resolves. `method` here
+# is the debug-only proot backend:
 scripts/tawc-exec.sh --foreground-app --action install \
     --arg id=arch \
     --arg method=proot \
-    --arg distro=archlinuxarm \
+    --arg distro=arch \
     --arg mirrorProxy=http://127.0.0.1:8080/proxy/
 
 # Debian sid via the (debug-only) packages bootstrap flavor — real
@@ -903,7 +934,8 @@ Nothing in Kotlin parses a Depends line or fabricates dpkg state.
    deleted on success; on failure `RootfsCleaner` reaps it at
    uninstall (explicit `bootstrap-work` entry in its pass 2).
 5. Rejoin the flavor-agnostic tail: `configure → TawcInstaller →
-   initPackageManager → installBasePackages`.
+   initPackageManager → installPackages(basePackages) → npm
+   provisioning`.
 
 debootstrap runs with `--no-check-sig`. **That flag weakens nothing**:
 verification already happened in Kotlin upstream of it — the local
@@ -990,20 +1022,21 @@ Hard rules:
 | --- | --- | --- |
 | Arch x86_64 (`geo.mirror.pkgbuild.com`, HTTPS) | PGP detached signature `<tarball>.sig`, against Pierre Schmitz's Arch developer key (`3E80 CA1A 8B89 F69C BA57 D98A 76A5 EF90 5444 9A5C`) shipped at `res/raw/arch_signing_key.asc` | `BootstrapVerification.Pgp` in `ArchLinuxX86_64.kt` |
 | ALARM aarch64 (`fl.us.mirror.archlinuxarm.org`, HTTPS) | PGP detached signature `<tarball>.sig`, against the Arch Linux ARM Build System key (`68B3 537F 39A3 13B3 E574 D067 7719 3F15 2BDB E6A6`) shipped at `res/raw/archlinuxarm_signing_key.asc` — the same key `pacman-key --populate archlinuxarm` pins for packages | `BootstrapVerification.Pgp` in `ArchLinuxArm.kt` |
-| Manjaro ARM aarch64 (`github.com/manjaro-arm/rootfs/releases`, HTTPS) | SHA-256 from the GitHub Releases REST API: `api.github.com/repos/manjaro-arm/rootfs/releases/latest` returns the asset's server-computed `digest: sha256:<hex>`. We fetch that JSON over HTTPS in `ManjaroArm.resolveBootstrap`, then verify the downloaded tarball's SHA-256 matches before extract | `BootstrapVerification.Sha256` (Manjaro path) in `ManjaroArm.kt` |
-| Void Linux x86_64 / aarch64 glibc (`repo-default.voidlinux.org/live/current/`, HTTPS) | SHA-256 from upstream `sha256sum.txt`, **and** the minisign (Ed25519) signature `sha256sum.sig` over that manifest, checked against the per-image-date Void release key — bundled in `VoidReleaseKeys` from void-packages on GitHub, i.e. a second origin. `VoidSha256Resolver.resolveLatest` verifies the signature before trusting any digest from the manifest, then the tarball's SHA-256 is checked before extract | `Minisign.kt` + `VoidSha256Resolver.kt`, yielding `BootstrapVerification.Sha256` in `VoidLinux{X86_64,Aarch64}.kt` |
 | Debian sid packages flavor (`deb.debian.org`, debug-only) | Clearsigned `dists/sid/InRelease` verified against the Debian Archive Automatic Signing Keys 12/bookworm + 13/trixie shipped at `res/raw/debian_archive_keyring.asc`; `Valid-Until` enforced (replay defence); `Packages.xz` fetched by-hash and digest-checked against the verified body; every `.deb` SHA-256-checked against the index before debootstrap sees it | `Clearsign.kt` / `DebianRelease.kt` / `PackageBootstrapInstaller.kt`; see *Bootstrap flavors* |
 | Debian sid x86_64 / aarch64 (`raw.githubusercontent.com/debuerreotype/docker-debian-artifacts`, HTTPS) | SHA-256 from the official debuerreotype Docker artifact OCI manifest. We resolve the `dist-amd64` / `dist-arm64v8` branch tip to a commit SHA via the GitHub API, fetch `image-manifest.json` at that pinned commit, read the single gzip layer digest, then verify `rootfs.tar.gz` (fetched from the same commit) against it before extract. Commit-pinning closes the mutable-branch race; the trust profile is still a single HTTPS origin (digest and tarball from the same repo) plus OCI digest sanity check | `BootstrapVerification.Sha256` (Debian path) in `DebianSid.kt` / `DebianDockerResolver.kt` |
-| In-chroot pacman packages | Default `SigLevel = Required DatabaseOptional`, against the keyring populated by `pacman-key --populate archlinux` / `archlinuxarm` / `archlinuxarm manjaro manjaro-arm` | `ArchPacmanCommon.kt` (the `Never` line was removed, `--populate` is no longer `\|\| true`'d) |
+| In-chroot pacman packages | Default `SigLevel = Required DatabaseOptional`, against the keyring populated by `pacman-key --populate archlinux` / `archlinuxarm` | `ArchPacmanCommon.kt` (the `Never` line was removed, `--populate` is no longer `\|\| true`'d) |
 
-### Same-origin SHA-256 bootstraps (Manjaro / Debian): trust profile
+### Same-origin SHA-256 bootstrap (Debian): trust profile
 
-Manjaro ARM sits below both Arch PGP paths. Upstream doesn't sign the
-tarball at all, but it is hosted on GitHub Releases and the
-GitHub API exposes a server-side SHA-256 of every release artifact in
-the asset's `digest` field. We fetch that JSON over HTTPS to
-`api.github.com` and use the digest to verify the tarball before
-extract.
+Debian sid's digest and tarball both come from the debuerreotype
+GitHub repo, so its verification is a corruption/host-swap check, not
+an integrity barrier against a compromised origin or a mis-issued
+cert. The branch tip is commit-pinned via the GitHub API before
+either fetch (closes the mutable-branch / force-push race), but
+Debian publishes no out-of-band signature for these artifacts, so
+the origin itself remains the trust root. Post-extract, apt verifies
+every package against the debian-archive-keyring shipped in the
+bootstrap, so the exposure is the bootstrap alone.
 
 What this catches:
 
@@ -1015,88 +1048,14 @@ What this catches:
 
 What it does **not** catch:
 
-- A compromise of the manjaro-arm GitHub org pushing a malicious
+- A compromise of the debuerreotype GitHub repo pushing a malicious
   artifact: the API would return that artifact's matching digest, so
   our check would still pass. Same threat as any HTTPS-distributed
   artifact without a separate offline-key signature chain.
 
 Weaker than `Pgp`: this rests on a single HTTPS endpoint's trust,
 whereas a `.sig` is bound to a key in the APK and survives a
-compromised origin. When upstream Manjaro starts shipping a detached
-PGP signature we should switch over — ALARM did exactly that in
-2026-08, so it's worth re-checking periodically rather than assuming
-upstream never will.
-
-The same analysis applies to Debian sid, with one aggravating detail:
-its digest and tarball both come from the debuerreotype GitHub repo,
-so it is a corruption/host-swap check, not an integrity barrier
-against a compromised origin or a mis-issued cert. The branch tip is
-commit-pinned via the GitHub API before either fetch (closes the
-mutable-branch / force-push race), but Debian publishes no
-out-of-band signature for these artifacts, so the origin itself
-remains the trust root. Post-extract, apt verifies every package
-against the debian-archive-keyring shipped in the bootstrap, so the
-exposure is the bootstrap alone.
-
-### Void: signed checksum manifest (minisign, second origin)
-
-Void used to be in the same-origin bucket — `sha256sum.txt` and the
-ROOTFS tarball both live on `repo-default.voidlinux.org/live/current/`,
-so a compromised origin or a mis-issued cert served a matching pair.
-It isn't any more: upstream publishes `sha256sum.sig` next to the
-manifest, and we check it.
-
-Mechanics (`Minisign.kt`, `VoidSha256Resolver.kt`, `VoidReleaseKeys.kt`):
-
-- The format is **minisign**, not OpenBSD signify — the pubkey
-  comments literally read "minisign public key <id>", and the current
-  signature uses minisign's prehashed algorithm `ED` (Ed25519 over
-  BLAKE2b-512 of the file). `Minisign` accepts plain `Ed` too, and
-  verifies the trusted-comment global signature when present. The
-  crypto is BouncyCastle's `Ed25519Signer` + `Blake2bDigest`; we do
-  not shell out and do not depend on a `minisign` binary.
-- Keys are **per image date**: the signature's trusted comment says
-  "This key is only valid for images with date YYYYMMDD", and the
-  matching pubkey is published as
-  `srcpkgs/void-release-keys/files/void-release-<date>.pub` in
-  void-linux/void-packages on **GitHub**. That's the point — the key
-  origin is independent of voidlinux.org, so forging a bootstrap now
-  requires compromising both — weaker than the Arch/ALARM PGP tier,
-  where the key ships in the APK, but well above a single origin.
-- All keys known at build time are bundled verbatim in
-  `VoidReleaseKeys`, so the common case needs no extra fetch and no
-  runtime trust in GitHub at all. If `live/current/` moves to an image
-  date newer than the APK, we fetch that one key from
-  `raw.githubusercontent.com` rather than bricking installs.
-- **Fails closed** end to end: unfetchable `.sig`, malformed
-  signature, key-id mismatch, bad signature, or an image date with no
-  bundled key *and* no fetchable key all throw out of
-  `resolveBootstrap`, before anything is downloaded.
-- The image date used to pick the key comes from the manifest line we
-  are about to trust, i.e. from unverified bytes. That's fine: it only
-  selects *which* genuine upstream key we verify against, and every
-  key at that URL is a real Void key. An attacker steering the choice
-  still has to produce a signature under a key they don't have.
-- Order of operations matters and is deliberate: parse → resolve key →
-  verify signature over the raw manifest bytes → only then use the
-  parsed filename/digest. The manifest bytes are kept undecoded for
-  hashing so a charset round-trip can't perturb them.
-
-Residual risk: **rollback**. An attacker with origin control can serve
-an older, genuinely-signed Void release (manifest + sig + tarball all
-consistent) instead of the current one. We accept any date with an
-obtainable key, so this passes. It's a much weaker attack than
-arbitrary content — the user gets a real, older Void rootfs, which
-`xbps-install -Suy` then updates — and pinning a floor date would
-break installs whenever a key lands in void-packages before or after
-the image goes live. Not worth the machinery; recorded here so nobody
-mistakes it for an oversight.
-
-The upstream vectors (the real 20250202 `sha256sum.txt` +
-`sha256sum.sig`) are checked into `app/src/test/resources/minisign/`
-and exercised by `MinisignTest`, which also verifies every bundled key
-parses — a typo in `VoidReleaseKeys` fails the unit tests rather than
-an install.
+compromised origin.
 
 ### ALARM bootstrap: from cross-mirror MD5 to PGP
 
@@ -1167,7 +1126,7 @@ Two consequences worth knowing:
 
 ## Slimming policy
 
-The chroot is a Wayland-userland-only environment — no kernel runs
+The chroot is a userspace-only environment — no kernel runs
 inside, no init system manages services, no user logs in
 interactively. Anything in the bootstrap that exists to boot a real
 Linux install or make a package manageable from a local console is
@@ -1217,7 +1176,7 @@ cost) and runs in three pieces:
    run anyway).
 
 Plus `pacman -Scc --noconfirm` after every install transaction
-(`installBasePackages`, integration-test package setup) to drop the
+(`installPackages`, integration-test package setup) to drop the
 fetched `.pkg.tar.xz` files — we never reinstall in place, so caching
 costs only disk.
 
@@ -1238,7 +1197,7 @@ Two consequences of where each piece lives:
 - **Integration-test package setup upgrades only when packages are
   missing.** `scripts/run-integration-tests.sh` first queries the
   package manager for the required runtime set. If anything is absent,
-  Arch/Manjaro use `pacman -Syu --needed <pkgs>` so the local DB is
+  Arch uses `pacman -Syu --needed <pkgs>` so the local DB is
   fresh in the same transaction the new packages come down — closes
   the version-skew window that bricked the install pipeline at one
   point.
@@ -1303,7 +1262,7 @@ keeps the trigger surface debug-only.
   [DistroRegistry.forInstallation] is what dispatches to the right
   one at runtime.
 - (Done) **proot (rootless) installations** — `ProotMethod.kt` ships
-  alongside `ChrootMounter` / `ChrootRunner` and is routed via the
+  and is routed via the
   `Installation.method` strategy field. **Superseded by tawcroot for
   release builds; see "Install methods" above.**
 - **Multiple installs** — vary the id passed in via the `--es id …`
@@ -1326,7 +1285,7 @@ transitions described above.
 Why this is the right default:
 
 - **No risk of an app update breaking a working chroot.** Users will
-  have hand-installed packages, Firefox profiles, dotfiles, and
+  have hand-installed packages, tool configs, dotfiles, and
   whatever else inside the rootfs — none of that should be at the
   mercy of `configure()` changes shipped in a routine app update.
 - **Most config changes aren't critical for keeping the chroot
@@ -1356,8 +1315,8 @@ to think more carefully about what's safe to overwrite.
 
 ### Frozen identifiers (renaming breaks existing installs)
 
-These strings are persisted in user-owned state (metadata.json,
-inside rootfses, or Android's launcher pin store) and must be
+These strings are persisted in user-owned state (metadata.json or
+inside rootfses) and must be
 treated as a frozen wire format once a release ships — renaming
 one strands or breaks every existing install, and no app-side
 migration can fully repair it:
@@ -1367,28 +1326,23 @@ migration can fully repair it:
   Worst case of the lot: an unresolvable key makes launch silently
   no-op and makes uninstall fall back to `defaultForHost`, i.e.
   cleanup under the *wrong* method's assumptions.
-- **Distro keys** `"arch"` / `"manjaro"` / `"void"` / `"debian-sid"`
+- **Distro keys** `"arch"` / `"debian-sid"`
   (`metadata.distro`, matched exactly in
   [DistroRegistry.forInstallation] together with the ABI in
   `metadata.arch`).
-- **Pinned-shortcut format**: shortcut id `"<installId>/<desktopId>"`
-  and the intent extras keys `"installId"` / `"desktopId"` /
-  `"label"` ([EntryShortcuts], [ShortcutLaunchActivity]). Persisted
-  by the system launcher, which the app cannot rewrite — a format
-  change turns every existing pin into a dead icon.
 - **`/usr/lib/tawc/bashrc`**: this absolute path is baked into the
   one-time user-owned `/root/.bashrc` stub at configure time
   ([ShellDefaults]); moving the app-owned file silently unsources
   shell defaults in every existing rootfs.
 - **`/usr/local/bin/ando`** and the `ando` CLI surface — a public
   command users script against (notes/ando.md).
-- Softer, prefs-only: `GraphicsBackend.key` values and the
+- Softer, prefs-only: `VulkanDriver.key` values and the
   `tawc-settings` pref keys ([Settings]). Unknown values already
   fall back to defaults gracefully, so a rename only resets the
   user's choice — avoid anyway.
 
 Tawc-owned rootfs paths shipped via [TawcInstaller]
-(`/usr/lib/hybris/`, `/usr/lib/gfxstream/`, `/usr/lib/mesa-zink/`)
+(`/usr/lib/hybris/`, `/usr/lib/turnip/`)
 are *not* frozen at this level — the persisted install manifest
 wipes old dests and lays new ones on upgrade — but user scripts may
 reference them, so treat moves as user-visible changes.
@@ -1434,7 +1388,7 @@ When you do bump it, decide one of:
 the schema number says "what fields are in this file," but the more
 useful question for any real migration is "what code wrote this
 rootfs." Two installs with the same `schemaVersion` can differ in
-`installBasePackages` output, slimming policy, etc., so the version
+`installPackages` output, slimming policy, etc., so the version
 code is what an `if (installedAtAppVersionCode < N)` check should
 key on.
 
@@ -1526,12 +1480,11 @@ doing. Don't re-file these as issues.
 ## Host-side bridge
 
 `scripts/rootfs-run.sh` is the host-driven counterpart to the
-in-app launcher. Both route through the dev exec broker's
+in-app Run action. Both route through the dev exec broker's
 `RUNINSIDE` request type, which dispatches to
 [InstallationMethod.startInside] — the single Kotlin entry point
 where mount setup, env injection (via [RootfsEnv]'s `env -i` wrapper),
 and chroot exec live (see
 [rootfs-sessions.md](rootfs-sessions.md) and
 [exec-broker.md](exec-broker.md)). Used by the integration tests
-(`tests/integration/src/adb.rs`), `scripts/run-integration-tests.sh`,
-and `scripts/run-integration-tests.sh`.
+(`tests/integration/src/adb.rs`) and `scripts/run-integration-tests.sh`.

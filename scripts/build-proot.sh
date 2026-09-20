@@ -65,7 +65,8 @@ DEPS_DIR="$REPO_DIR/deps/proot-deps"
 TALLOC_DIR="$DEPS_DIR/talloc-${TALLOC_VERSION}"
 JNILIBS_DIR="$REPO_DIR/app/src/main/jniLibs"
 
-# NDK lookup mirrors scripts/build-libxkbcommon.sh — see that script for rationale.
+# NDK lookup: honour an explicit $ANDROID_NDK_HOME, else fall back to the
+# newest NDK installed under $ANDROID_HOME/ndk.
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     DEFAULT_SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
     if [ -d "$DEFAULT_SDK/ndk" ]; then

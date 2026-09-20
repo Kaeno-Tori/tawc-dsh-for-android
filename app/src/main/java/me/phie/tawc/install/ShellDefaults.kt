@@ -8,12 +8,12 @@ package me.phie.tawc.install
  *    [ShellDefaultsInstallProvider] and refreshed in every rootfs on
  *    app upgrade. Defaults can change later and existing installs
  *    pick them up.
- *  - `/root/.bashrc` + `/root/.bash_profile` — user-owned stubs
- *    written exactly once at install configure time ([configureScript]).
- *    `.bashrc` just sources the app-owned file (guarded), so the user
- *    can delete that line to opt out permanently on that rootfs.
- *    `.bash_profile` makes login shells (`bash -l`, the terminal's
- *    spawn mode) read `.bashrc` on every distro family.
+ *  - `/root/.bashrc`, `/root/.bash_profile` and `/root/.gitconfig` —
+ *    user-owned stubs written exactly once at install configure time
+ *    ([configureScript]). `.bashrc` just sources the app-owned file
+ *    (guarded), so the user can delete that line to opt out permanently
+ *    on that rootfs. `.bash_profile` makes login shells (`bash -l`, the
+ *    terminal's spawn mode) read `.bashrc` on every distro family.
  *
  * This is deliberately NOT under `/etc/profile.d/` — profile.d runs
  * early in login-shell startup and the distros' shipped bashrc files
@@ -25,7 +25,7 @@ package me.phie.tawc.install
 internal object ShellDefaults {
     /** App-owned defaults file inside the rootfs (tawc namespace).
      *  NOT under `/usr/share/tawc/` — that dir is bind-mounted over
-     *  with `<appData>/share` (wayland socket) at runtime, which
+     *  with `<appData>/share` at runtime, which
      *  would shadow anything the installer writes there. */
     const val GUEST_BASHRC_PATH = "/usr/lib/tawc/bashrc"
 
@@ -63,5 +63,24 @@ internal object ShellDefaults {
         appendLine("cat > \"\$ROOTFS/root/.bash_profile\" <<'TAWC_BASH_PROFILE_EOF'")
         appendLine("[ -f ~/.bashrc ] && . ~/.bashrc")
         appendLine("TAWC_BASH_PROFILE_EOF")
+        // git, for the two settings that make it usable at all rather
+        // than pleasant:
+        //
+        //  - `user.*`: without them `git commit` refuses outright
+        //    ("Please tell me who you are"). The values are placeholders
+        //    in the honest sense — they are what a container commits as
+        //    until the user says otherwise, and they are trivially
+        //    editable in this file.
+        //  - `core.quotepath=false`: by default git escapes every
+        //    non-ASCII byte in a path, so a CJK filename arrives as
+        //    `\344\275\240\345\245\275.txt` in `git status`/`diff` —
+        //    unreadable, and nothing to do with the locale.
+        appendLine("cat > \"\$ROOTFS/root/.gitconfig\" <<'TAWC_GITCONFIG_EOF'")
+        appendLine("[user]")
+        appendLine("\tname = root")
+        appendLine("\temail = root@localhost")
+        appendLine("[core]")
+        appendLine("\tquotepath = false")
+        appendLine("TAWC_GITCONFIG_EOF")
     }
 }

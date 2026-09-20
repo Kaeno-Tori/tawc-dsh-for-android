@@ -1,5 +1,10 @@
 # hybris TLS patcher vs BoringSSL FIPS check: workaround only
 
+> **Fork note:** reported against the desktop/GL build. The display stack
+> and its GL clients are gone in this fork, so the `gtk4-widget-factory`
+> symptom below is no longer reachable here; the libhybris patcher it
+> describes still ships (compute-only libhybris).
+
 Upstream report: https://github.com/wmww/tawc/issues/11 — Debian sid,
 `gtk4-widget-factory` aborts at startup with `FIPS integrity test
 failed`. Any vendor graphics library that lists Android's `libcrypto.so`

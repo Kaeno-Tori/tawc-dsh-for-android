@@ -31,4 +31,20 @@ data class OperationProgress(
     val stage: OperationStage,
     val message: String,
     val percent: Int? = null,
+    /**
+     * Ordered step names for this operation, and the index of the one
+     * running now. Empty when the op has no meaningful step list, which
+     * viewers render as "just a status line + bar".
+     *
+     * This layer deliberately doesn't know what the steps *are* — it
+     * only lays them out — so an operation declares the steps it will
+     * actually walk. An install that imports a local pack has nothing to
+     * download and nothing to verify, so it doesn't list those; a
+     * checklist with steps that never run would be worse than none.
+     *
+     * [currentStep] is `steps.size` once every step is done, and `-1`
+     * when there is no list.
+     */
+    val steps: List<String> = emptyList(),
+    val currentStep: Int = -1,
 )

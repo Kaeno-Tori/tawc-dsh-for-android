@@ -99,15 +99,15 @@ unrestricted. **We deliberately handle only the filesystem read / write
 so nothing GPU/IPC-shaped breaks:
 
 - **`LANDLOCK_ACCESS_FS_IOCTL_DEV`** (ABI 5+) — NOT handled. GPU
-  passthrough (`ioctl` on `/dev/kgsl-3d0`, binder, gfxstream) must stay
+  passthrough (`ioctl` on `/dev/kgsl-3d0`, binder) must stay
   unrestricted; those go straight to the host kernel by design
   (notes/tawcroot/overview.md §"What it explicitly is not"). Not naming this right
   leaves all device ioctls unrestricted.
 - **`LANDLOCK_ACCESS_NET_*`** (ABI 4+) — NOT handled. This is a
   filesystem-containment feature only; leave sockets alone.
 - **AF_UNIX connect** — current Landlock does not gate connecting to a
-  filesystem socket, so wayland/kumquat/ando keep working. (Their
-  directories are granted anyway as bind sources.)
+  filesystem socket, so ando keeps working. (Its directory is granted
+  anyway as a bind source.)
 
 The handled mask must then be **clamped to what the running ABI version
 supports**, or `landlock_create_ruleset` fails with `-EINVAL`. The fs
@@ -276,14 +276,14 @@ Per the maintenance contract (notes/tawcroot/status.md §"Maintenance contract")
   - normal in-rootfs and in-bind operations (read, write, create,
     delete, exec-via-mmap, cross-dir rename) still succeed;
   - a post-emulated-`chroot` guest still operates normally;
-  - ando/wayland-style AF_UNIX connect through a bound socket dir still
+  - ando-style AF_UNIX connect through a bound socket dir still
     works;
   - a device `ioctl` path is unrestricted (guard against accidentally
     handling `IOCTL_DEV`).
   - A/B the suite with `--landlock=off` vs `auto` to prove the escape is
     blocked *only* when active and that `off` is a clean passthrough.
 - **Device 5.4 regression:** assert the probe reports unsupported and
-  tawcroot behaves exactly as before (no new failures, `pacman`/Firefox
+  tawcroot behaves exactly as before (no new failures, `pacman`
   smoke unaffected). This is the "ships doing nothing on the real device"
   guarantee.
 - **Device ≥5.13 (when one is in the loop):** the must-verify that

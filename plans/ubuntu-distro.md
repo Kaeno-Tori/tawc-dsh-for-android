@@ -1,5 +1,12 @@
 # Add Ubuntu as a distro (signed ubuntu-base tarball)
 
+> **Note (fork state):** this plan is modeled on the Void Linux distro the
+> repo used to ship. Void and its signed-manifest resolver
+> (`VoidSha256Resolver`) were removed, so every `Void` /
+> `VoidSha256Resolver` reference below is historical and the cited files and
+> notes it names no longer exist. The design it describes (signed
+> `SHA256SUMS` → `BootstrapVerification.Sha256`) is unchanged.
+
 An apt distro with an app-shipped root of trust, on both ABIs, using only
 existing installer machinery. Ubuntu is "just another distro": one registry
 entry, one resolver, one shipped PGP key. It does not touch the Debian sid

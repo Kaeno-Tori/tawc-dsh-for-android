@@ -1,6 +1,8 @@
 package me.phie.tawc.install.distro.arch
 
+import me.phie.tawc.install.BootstrapMirror
 import me.phie.tawc.install.InstallationMethod
+import me.phie.tawc.install.MirrorProbe
 import me.phie.tawc.install.MirrorProxy
 import me.phie.tawc.install.ShellDefaults
 import java.io.IOException
@@ -12,7 +14,7 @@ import java.io.IOException
  * name (`archlinux` vs `archlinuxarm`), the mirrorlist contents, and
  * the cruft package set (kernel / firmware split package names).
  *
- * The chroot is a Wayland-userland-only environment — no kernel runs
+ * The chroot is a userspace-only environment — no kernel runs
  * inside, no init system manages services, no user logs in
  * interactively. Anything in the bootstrap that exists to boot a real
  * Linux install (kernel, firmware, mkinitcpio, console keymaps) or to
@@ -30,6 +32,102 @@ internal object ArchPacmanCommon {
      * comments either).
      */
     private val SERVER_LINE_RE = Regex("""\s*Server\s*=\s*(\S+)\s*""")
+
+    /**
+     * Re-root [body]'s package source onto each of [bases], in order —
+     * the `Server =` lines pacman walks on a 404. Null when there is
+     * nothing to do (no base, or no prefix to re-root from).
+     *
+     * Only the *first* `Server =` line of [body] is kept as the template.
+     * The rest point at other upstream mirrors, and a caller that
+     * supplies bases has measured them on this network already — leaving
+     * upstream's other hosts in means pacman quietly falls back to one
+     * that hangs for minutes before failing, which reads as "the mirror
+     * didn't help" rather than as an error. Several *measured* lines is
+     * the opposite: skipping past a stale mirror to the next good one is
+     * exactly why pacman takes a list.
+     *
+     * The URL rewrite is the same one the bootstrap tarball goes
+     * through ([me.phie.tawc.install.BootstrapMirror.rewrite]): the
+     * mirror replaces the *prefix* both share, so the `$arch/$repo` (or
+     * `$repo/os/$arch`) tail — which differs per distro — is carried
+     * over rather than guessed.
+     */
+    internal fun mirrorListFor(body: String, prefix: String?, bases: List<String>): String? {
+        if (prefix == null) return null
+        val primary = primaryServer(body) ?: return null
+        val rewritten = bases.mapNotNull { BootstrapMirror.rewrite(primary, prefix, it) }
+        if (rewritten.isEmpty()) return null
+        return rewritten.joinToString("\n") { "Server = $it" }
+    }
+
+    /**
+     * The first `Server =` URL in [body] — the template both the
+     * mirrorlist rewrite and the probe-URL builder start from, so they
+     * can't drift on which line counts.
+     */
+    private fun primaryServer(body: String): String? = body.lineSequence()
+        .mapNotNull { SERVER_LINE_RE.matchEntire(it)?.groupValues?.get(1) }
+        .firstOrNull()
+
+    /**
+     * The repository URLs a probe should measure for [bases], one per
+     * base, in the order given — the [mirrorListFor] rewrite with
+     * pacman's placeholders resolved and the database file appended.
+     *
+     * pacman's `Server =` names a *directory*; what actually comes over
+     * the wire from there is `<dir>/<repo>.db`. So the mirrorlist line
+     * itself is not a measurable URL (`$arch`/`$repo` are pacman's to
+     * expand, and a probe request would fetch a literal `$arch` path),
+     * and the directory alone would measure a redirect or a 404 index
+     * rather than the database the install depends on.
+     *
+     * No `.sig` counterpart, deliberately: ALARM publishes no
+     * `.db.sig`, so a signature check here would drop every candidate.
+     * See [me.phie.tawc.install.MirrorProbe.Source].
+     *
+     * @param repo pacman repository to measure, e.g. `"extra"`.
+     * @param arch pacman's `$arch` for this distro (`"aarch64"`,
+     *   `"x86_64"`) — the same value the `Server =` templates carry as a
+     *   placeholder.
+     * @return empty when there is nothing to build from (no [prefix],
+     *   no `Server =` line) or when no base can be re-rooted.
+     */
+    internal fun packageProbeUrls(
+        body: String,
+        prefix: String?,
+        bases: List<String>,
+        repo: String,
+        arch: String,
+    ): List<MirrorProbe.Source> {
+        if (prefix == null) return emptyList()
+        val primary = primaryServer(body) ?: return emptyList()
+        // The distro's own upstream joins the pool, last — the same
+        // arrangement [me.phie.tawc.install.MirrorProbe.order] uses for
+        // the bootstrap tarball. `bases` are the mirrors worth racing;
+        // upstream is the one host certainly carrying the whole tree,
+        // which makes it the right last resort and the wrong first
+        // choice. It is *measured* like every other candidate, so a
+        // network where upstream genuinely is the fastest source picks
+        // it — the honest answer, not a fallback nobody looked at.
+        //
+        // Derived from [prefix] rather than naming the host a second
+        // time: the prefix *is* the distro's upstream root
+        // ([me.phie.tawc.install.distro.Distro.bootstrapMirrorPrefix]),
+        // so re-rooting the primary `Server =` line onto it reproduces
+        // that line verbatim, and a distro that changes mirrors keeps
+        // this honest for free.
+        val candidates = bases + BootstrapMirror.normalise(prefix)
+        return candidates.mapNotNull { base ->
+            val rewritten = BootstrapMirror.rewrite(primary, prefix, base) ?: return@mapNotNull null
+            val resolved = rewritten.replace("\$arch", arch).replace("\$repo", repo)
+            val url = "$resolved/$repo.db"
+            // Same host extraction the probe uses to label its own
+            // candidates, so both entry points log a mirror identically.
+            val label = MirrorProbe.hostOf(url) ?: return@mapNotNull null
+            MirrorProbe.Source(base = base, label = label, url = url)
+        }
+    }
 
     /**
      * Paths under the rootfs to delete after the bootstrap tarball is
@@ -255,17 +353,21 @@ internal object ArchPacmanCommon {
         // initramfs builder — only useful for booting a kernel
         "mkinitcpio",
         "mkinitcpio-busybox",
-        // editors — apps that need an EDITOR can install one
-        // explicitly. (gpm is a console-only soft-dep of vim/emacs;
-        // once vim is gone nothing else here pulls it in.)
+        // editors — the bootstrap ships three; exactly one comes back
+        // via [DEFAULT_BASE_PACKAGES] (`nano`, for the EDITOR-invoking
+        // paths), which is why this is not the size saving it looks
+        // like. The other two are deleted for real.
         "ex-vi-compat",
         "nano",
         "vim",
         "vim-runtime",
         "gpm",
         // networking userland — DNS resolution comes from
-        // /etc/resolv.conf, no firewall, no SSH, no DHCP client.
-        // (iputils/iproute2 are kept; they are hard deps of `base`.)
+        // /etc/resolv.conf, no firewall, no DHCP client. `openssh` is
+        // here because the *server* is dead weight, but the client is
+        // what `git@host:` needs, so [DEFAULT_BASE_PACKAGES] installs
+        // the package back. (iputils/iproute2 are kept; they are hard
+        // deps of `base`.)
         "dhcpcd",
         "iptables",
         "nftables",
@@ -281,8 +383,8 @@ internal object ArchPacmanCommon {
     /**
      * Write `/etc/resolv.conf`, the pacman.conf tweaks, and the
      * mirrorlist, then strip the bootstrap of the trees in
-     * [POST_EXTRACT_PURGE_PATHS]. The in-rootfs env (PATH, Wayland,
-     * GL, X11) comes from [RootfsEnv] via `env -i KEY=VAL` on every
+     * [POST_EXTRACT_PURGE_PATHS]. The in-rootfs env (PATH, GPU) comes
+     * from [RootfsEnv] via `env -i KEY=VAL` on every
      * spawn — nothing is written under `/etc/profile.d/` (see
      * notes/installation.md). Shell-default stubs for /root come from
      * [ShellDefaults.configureScript].
@@ -303,17 +405,34 @@ internal object ArchPacmanCommon {
         ignoredPackages: List<String>,
         mirrorProxy: MirrorProxy?,
         log: (String) -> Unit,
+        mirrorPrefix: String? = null,
+        mirrorBases: List<String> = emptyList(),
     ) {
         val ignoreLine = "IgnorePkg = " + ignoredPackages.joinToString(" ")
+        // [mirrorBases] is the whole story: the caller that owns a
+        // pinned mirror ([me.phie.tawc.install.Installer]) passes it
+        // here, and the ones that measured pass the measurement.
+        //
+        // This deliberately does **not** fall back to
+        // `Settings.bootstrapMirror`. That fallback made a base typed in
+        // the install form — for *that* form's distro — reach every
+        // route that measured nothing, including an imported pack
+        // carrying a different distro. `mirrorListFor` re-roots by
+        // prefix, so the result was a mirrorlist pointing at another
+        // distro's directory: syntactically fine, 404 on every package,
+        // and arrived at through a screen that never showed the setting.
+        // A pack install measures its own mirrors instead
+        // ([me.phie.tawc.install.Installer.packageMirrorsForPack]).
+        val mirroredBody = mirrorListFor(mirrorListBody, mirrorPrefix, mirrorBases) ?: mirrorListBody
         // Funnel every `Server = <url>` line through the proxy when set.
         // Pacman's $repo/$arch substitution happens after URL composition,
         // so the dollar signs survive verbatim through MirrorProxy.wrap.
         val effectiveMirrorList = if (mirrorProxy != null) {
-            mirrorListBody.lineSequence().joinToString("\n") { line ->
+            mirroredBody.lineSequence().joinToString("\n") { line ->
                 val m = SERVER_LINE_RE.matchEntire(line) ?: return@joinToString line
                 "Server = " + mirrorProxy.wrap(m.groupValues[1])
             }
-        } else mirrorListBody
+        } else mirroredBody
         val noExtractLines = NO_EXTRACT_PATTERNS.joinToString("\n") { "NoExtract = $it" }
         val purgeList = POST_EXTRACT_PURGE_PATHS.joinToString(" ") { "\"\$ROOTFS$it\"" }
         // Globs are intentionally NOT quoted — the shell expands the
@@ -456,7 +575,7 @@ PACMAN_EOF
      * the `base` metapackage.
      *
      * The `pacman -Syu` step is intentionally *not* here — see
-     * [installBasePackages]. Splitting it out introduces a window
+     * [installPackages]. Splitting it out introduces a window
      * where the in-chroot DB and the upstream mirror state can drift
      * and pacman fetches a `pkg.tar.xz` that's already been rolled
      * forward; merging the sync into the same transaction as the
@@ -536,7 +655,7 @@ PACMAN_EOF
      * so the cache never accumulates. No explicit `rm` here, and no
      * `pacman -Scc` (which is a no-op under `--noconfirm`).
      */
-    fun installBasePackages(
+    fun installPackages(
         method: InstallationMethod,
         rootfs: String,
         packages: List<String>,
@@ -557,12 +676,54 @@ PACMAN_EOF
     }
 
     /**
-     * Common base package set for every Arch flavour. Kept minimal —
-     * `inetutils` for `hostname` (shell hooks like wezterm's fall
-     * back to `hostnamectl` without it, which spams systemd errors
-     * in our systemd-less rootfs).
-     * Test/dev subsystems install their own deps via
+     * Common base package set for every Arch flavour.
+     *
+     * `inetutils` for `hostname` (shell hooks like wezterm's fall back to
+     * `hostnamectl` without it, which spams systemd errors in our
+     * systemd-less rootfs).
+     *
+     * The rest is the "can I actually work in here" set, added after
+     * measuring a fresh container and finding none of it present — while
+     * `ca-certificates` and `curl` *were*, so the TLS half of git needed
+     * nothing. Each entry earns its place:
+     *
+     *  - `git` — nothing in the base set provides it, and a Linux
+     *    container that can't clone is the first complaint. Its
+     *    `curl`/`openssl`/`pcre2` deps come with it.
+     *  - `less` — a `git` dependency in spirit but not in fact; without
+     *    it `git log`/`git diff` dump the whole thing to the screen.
+     *  - `nano` + `openssh` — both are in [SHARED_CRUFT_PACKAGES] (the
+     *    bootstrap ships them and we delete them by size), so this list
+     *    is what puts them *back*: an editor for the `EDITOR`-invoking
+     *    paths (`git commit` without `-m`), and an SSH client for
+     *    `git@github.com:` remotes.
+     *  - `python` + `base-devel` — node-gyp, i.e. the wall an npm install
+     *    with a native dependency hits. The largest part of this list by
+     *    far (gcc/binutils/make behind a ~2 KiB meta).
+     *
+     * Test/dev subsystems still install their own deps via
      * `scripts/run-integration-tests.sh`.
+     *
+     * Names verified against this repo on device (`pacman -Si`); the two
+     * that are *not* obviously the same name elsewhere are per-distro —
+     * see `AptCommon` (the only other package-manager family this app
+     * installs; the Void implementation is gone).
      */
-    val DEFAULT_BASE_PACKAGES: List<String> = listOf("inetutils")
+    val DEFAULT_BASE_PACKAGES: List<String> = listOf(
+        "inetutils",
+        "git",
+        "less",
+        "nano",
+        "openssh",
+        "python",
+        "base-devel",
+    )
+
+    /**
+     * Node runtime + npm for every Arch flavour. `npm` is its own
+     * package here (unlike Void, where `nodejs` carries it), and
+     * installing only `nodejs` leaves the provisioning stage with a
+     * runtime and no way to fetch DSH.
+     */
+    val RUNTIME_PACKAGES: List<String> = listOf("nodejs", "npm")
 }

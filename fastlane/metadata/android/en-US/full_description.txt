@@ -1,3 +1,0 @@
-TODO(maintainer): replace this whole file before submitting to F-Droid.
-Max 4000 characters. A proposed draft to rewrite from is in
-fastlane/DRAFTS.md.

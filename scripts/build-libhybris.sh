@@ -5,8 +5,8 @@
 # so libhybris can ship inside the APK as an asset rather than be built
 # on each device. See notes/building.md.
 #
-# libhybris MUST be glibc-linked: it is loaded by glibc Wayland clients
-# inside the chroot, and its `hooks.c` calls glibc-internal symbols.
+# libhybris MUST be glibc-linked: it is loaded inside the container (a
+# glibc distro rootfs), and its `hooks.c` calls glibc-internal symbols.
 # Therefore we use the distro's aarch64-linux-gnu cross-compiler, NOT
 # the Android NDK (which targets bionic).
 #
@@ -238,7 +238,7 @@ fi
 # `…/linker`, so the Kotlin side doesn't need HYBRIS_*_DIR env-var
 # overrides anymore. (LD_LIBRARY_PATH is still needed for the
 # by-name `dlopen("libEGL.so")` first-level lookup since we don't
-# ship --enable-glvnd; see notes/wsi-layer.md.)
+# ship --enable-glvnd.)
 CONFIGURE_ARGS=(
     --host="$HOST_TRIPLE"
     --prefix=/usr/lib/hybris
@@ -344,6 +344,45 @@ esac
 if ! "${HOST_TRIPLE}-readelf" -d "$LIB_DIR/libhybris-common.so.1.0.0" \
         | grep -q 'NEEDED.*libc\.so\.6'; then
     echo "ERROR: libhybris-common.so doesn't NEEDED libc.so.6 (glibc); wrong libc?" >&2
+    exit 1
+fi
+
+# ── Headless Vulkan platform plugin ──
+# libhybris's libvulkan.so.1 refuses to run until it has dlopen'd
+# `vulkanplatform_<HYBRIS_VULKANPLATFORM>.so`, and defaulting to "wayland"
+# means the container needs glibc Wayland or `_init_ws()` assert()s
+# (TAWC_DSH_DESIGN.md §11.1). Upstream's `vulkanplatform_null.so` is
+# the headless answer, but its Makefile links $(WAYLAND_SERVER_LIBS)
+# unconditionally, plus libgralloc and libhybris-vulkanplatformcommon
+# (which drags in wayland-client/server and libsync).
+#
+# Our Vulkan path is compute-only, so none of that is wanted: we build
+# deps/libhybris-shims/vulkanplatform_null.c over the autotools artefact
+# and [RootfsEnv] selects it with HYBRIS_VULKANPLATFORM=null. Same
+# pass-through as upstream, DT_NEEDED reduced to libc alone.
+#
+# -I"$BUILD_DIR" is load-bearing: ws.h's `struct ws_module` layout is
+# gated on WANT_WAYLAND, so this file must be compiled against the same
+# config.h libhybris itself was built with.
+echo "==> headless vulkanplatform_null.so"
+VULKAN_NULL="$LIB_DIR/libhybris/vulkanplatform_null.so"
+"$CC_BIN" \
+    -I"$BUILD_DIR" -I"$BUILD_DIR/vulkan" \
+    -I"$ANDROID_HEADERS_DIR" \
+    -idirafter "$HOST_VULKAN_INCLUDE" \
+    -idirafter "$HOST_WAYLAND_INCLUDE" \
+    -O2 -shared -fPIC \
+    -Wl,-soname,vulkanplatform_null.so \
+    -o "$VULKAN_NULL" \
+    "$REPO_DIR/deps/libhybris-shims/vulkanplatform_null.c"
+
+# Gate: if a Wayland/gralloc/vulkanplatformcommon dependency creeps back
+# in, the plugin stops loading in a container without glibc Wayland and
+# the failure is an assert() far from here.
+if "${HOST_TRIPLE}-readelf" -d "$VULKAN_NULL" \
+        | grep -qE 'NEEDED.*(libwayland|libgralloc|libhybris)'; then
+    echo "ERROR: $VULKAN_NULL links deps that must stay out:" >&2
+    "${HOST_TRIPLE}-readelf" -d "$VULKAN_NULL" | grep NEEDED >&2
     exit 1
 fi
 

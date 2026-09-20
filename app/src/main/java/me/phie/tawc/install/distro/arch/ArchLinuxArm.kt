@@ -4,6 +4,7 @@ import me.phie.tawc.install.BootstrapFormat
 import me.phie.tawc.install.BootstrapVerification
 import me.phie.tawc.install.Installation
 import me.phie.tawc.install.InstallationMethod
+import me.phie.tawc.install.MirrorProbe
 import me.phie.tawc.install.MirrorProxy
 import me.phie.tawc.install.distro.Distro
 import me.phie.tawc.install.distro.TarballBootstrap
@@ -55,7 +56,24 @@ internal object ArchLinuxArm : Distro {
         ),
     )
 
+    /**
+     * Upstream root is the mirror host itself, so a user mirror supplies
+     * its own directory: `https://mirrors.tuna.tsinghua.edu.cn/alarm`
+     * yields `…/alarm/os/ArchLinuxARM-aarch64-latest.tar.gz`, which is
+     * where ALARM's Chinese mirrors actually keep it.
+     */
+    override val bootstrapMirrorPrefix: String = "https://$PRIMARY_MIRROR/"
+
+    /**
+     * Most Chinese mirrors keep ALARM under `/archlinuxarm`. Huawei's
+     * uses `/alarm`, which is why the preset list carries origins only
+     * and this path stays here rather than being baked into each entry.
+     */
+    override val bootstrapMirrorPath: String = "/archlinuxarm"
+
     override val basePackages: List<String> = ArchPacmanCommon.DEFAULT_BASE_PACKAGES
+
+    override val runtimePackages: List<String> = ArchPacmanCommon.RUNTIME_PACKAGES
 
     /**
      * ALARM ships a single-Server mirrorlist
@@ -101,12 +119,31 @@ internal object ArchLinuxArm : Distro {
     /** See `ArchPacmanCommon.initPackageManager` — kernel package name. */
     private val ARCH_SPECIFIC_CRUFT = listOf("linux-aarch64")
 
+    /**
+     * ALARM's package tree is mirrored by the same hosts as its
+     * bootstrap tarball, so a base that serves one serves the other.
+     * `extra` is the repo every base package comes from; the probe URL
+     * it resolves to — e.g.
+     * `https://mirrors.ustc.edu.cn/archlinuxarm/aarch64/extra/extra.db`
+     * — is what pacman would fetch a database from. See
+     * [ArchPacmanCommon.packageProbeUrls].
+     */
+    override fun packageProbeUrls(bases: List<String>): List<MirrorProbe.Source> =
+        ArchPacmanCommon.packageProbeUrls(
+            MIRROR_LIST, bootstrapMirrorPrefix, bases, repo = "extra", arch = linuxArch,
+        )
+
     override fun configure(
         method: InstallationMethod,
         rootfs: String,
         mirrorProxy: MirrorProxy?,
         log: (String) -> Unit,
-    ) = ArchPacmanCommon.configure(method, rootfs, MIRROR_LIST, IGNORED_PACKAGES, mirrorProxy, log)
+        mirrorBases: List<String>,
+    ) = ArchPacmanCommon.configure(
+        method, rootfs, MIRROR_LIST, IGNORED_PACKAGES, mirrorProxy, log,
+        mirrorPrefix = bootstrapMirrorPrefix,
+        mirrorBases = mirrorBases,
+    )
 
     override fun initPackageManager(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
         ArchPacmanCommon.initPackageManager(
@@ -117,6 +154,10 @@ internal object ArchLinuxArm : Distro {
             log = log,
         )
 
-    override fun installBasePackages(method: InstallationMethod, rootfs: String, log: (String) -> Unit) =
-        ArchPacmanCommon.installBasePackages(method, rootfs, basePackages, log)
+    override fun installPackages(
+        method: InstallationMethod,
+        rootfs: String,
+        packages: List<String>,
+        log: (String) -> Unit,
+    ) = ArchPacmanCommon.installPackages(method, rootfs, packages, log)
 }

@@ -1,6 +1,5 @@
 package me.phie.tawc.install
 
-import android.graphics.Typeface
 import android.os.Bundle
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -9,6 +8,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import me.phie.tawc.R
 import me.phie.tawc.ui.buildChildScreen
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.verticalLp
 
 /**
@@ -24,7 +24,7 @@ class InstallMethodInfoActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val scaffold = buildChildScreen(getString(R.string.title_install_methods))
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
         val content = scaffold.content
 
         if (EnabledMethods.tawcroot) {
@@ -55,13 +55,12 @@ class InstallMethodInfoActivity : AppCompatActivity() {
     private fun section(parent: LinearLayout, pad: Int, title: String, body: String) {
         TextView(this).apply {
             text = title
-            textSize = 16f
-            setTypeface(typeface, Typeface.BOLD)
+            tawcText(R.style.TextAppearance_Tawc_CardTitle)
         }.also { parent.addView(it, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad / 4)) }
 
         TextView(this).apply {
             text = body
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
         }.also { parent.addView(it, verticalLp(MATCH_PARENT, WRAP_CONTENT, bottomMargin = pad)) }
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "ando-broker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# rlib, not cdylib: this is the shared native base that the JNI-bearing
+# `andobridge` cdylib links against. Keeping it a plain library is what
+# lets the broker ship without dragging in whatever else the app links
+# natively — see notes/ando.md "Components".
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Process-wide logcat + panic-hook setup (see src/logging.rs), shared by
+# every JNI entry point in the process.
+android_logger = "0.14"
+log = "0.4"
+# ando's whole data path is unix-syscall-shaped (SCM_RIGHTS, setpgid,
+# fchdir, waitid, kill). Deliberately no `jni` dependency: the broker is
+# not a JNI surface, the cdylibs that expose it are.
+libc = "0.2"

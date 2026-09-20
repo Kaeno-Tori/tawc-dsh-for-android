@@ -17,10 +17,10 @@ class TawcrootBindSpecsTest {
     private val share = "$files/share"
     private val hybrisDirs =
         listOf("/apex", "/vendor", "/system", "/system_ext")
+
     private val assetBinds = listOf(
         TawcrootMethod.BindSpec("$files/libhybris", "/usr/lib/hybris", ro = true),
-        TawcrootMethod.BindSpec("$files/mesa-zink", "/usr/lib/mesa-zink", ro = true),
-        TawcrootMethod.BindSpec("$files/mesa-gfxstream", "/usr/lib/gfxstream", ro = true),
+        TawcrootMethod.BindSpec("$files/turnip", "/usr/lib/turnip", ro = true),
     )
 
     @Test
@@ -45,11 +45,9 @@ class TawcrootBindSpecsTest {
                 "/system:/system:ro",
                 "/system_ext:/system_ext:ro",
                 "$files/libhybris:/usr/lib/hybris:ro",
-                "$files/mesa-zink:/usr/lib/mesa-zink:ro",
-                "$files/mesa-gfxstream:/usr/lib/gfxstream:ro",
+                "$files/turnip:/usr/lib/turnip:ro",
                 "$share:/usr/share/tawc",
                 "/data/data/me.phie.tawc/files/ando/arch:/run/tawc-ando",
-                "$share/xtmp/.X11-unix:/tmp/.X11-unix",
                 "/storage/emulated/0:/home/android",
                 "/:/android:ro",
             ),
@@ -63,8 +61,9 @@ class TawcrootBindSpecsTest {
      *  `exit(93)`s on a bind src that doesn't exist. */
     @Test
     fun noAssetsAndNoAndoOmitsThoseBinds() {
-        val args = TawcrootMethod.bindSpecs(share, hybrisDirs, emptyList(), emptyList(), null)
-            .map { it.arg() }
+        val args =
+            TawcrootMethod.bindSpecs(share, hybrisDirs, emptyList(), emptyList(), null)
+                .map { it.arg() }
         assertEquals(
             listOf(
                 "/dev:/dev",
@@ -75,7 +74,6 @@ class TawcrootBindSpecsTest {
                 "/system:/system:ro",
                 "/system_ext:/system_ext:ro",
                 "$share:/usr/share/tawc",
-                "$share/xtmp/.X11-unix:/tmp/.X11-unix",
             ),
             args,
         )

@@ -54,8 +54,8 @@ import java.io.InterruptedIOException
  *      step 4 is the guard), then explicit ando dir →
  *      `metadata.json.tmp` → `metadata.json` → `rmdir` so a cancel
  *      mid-wipe can never strand
- *      the slot without `metadata.json` — the home screen still lists
- *      the slot and a second uninstall picks up cleanly because pass 1
+ *      the slot without `metadata.json` — the slot stays discoverable
+ *      and a second uninstall picks up cleanly because pass 1
  *      is idempotent. Root-owned trees (chroot) delete via `su`
  *      directly; app-uid trees get a `chmod -R u+rwX` first
  *      (mode-0500 bootstrap dirs, e.g. ca-certificates' `cadir`) and
@@ -149,8 +149,8 @@ object RootfsCleaner {
         // `metadata.json`, then `rmdir`. `find -depth` leaves
         // readdir-order between siblings undefined, which means a
         // cancel between two arbitrary unlinks could orphan the slot
-        // (installDir present, metadata.json gone — invisible on the
-        // home screen). Explicit order makes metadata.json the
+        // (installDir present, metadata.json gone — the slot is
+        // invisible to the app). Explicit order makes metadata.json the
         // second-to-last visible artefact, with only the empty dir
         // remaining and `rmdir` finishing the job near-atomically.
         log("rm: container at $installPath (tawcroot, ando, metadata.json, rmdir)")

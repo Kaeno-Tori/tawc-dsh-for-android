@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import me.phie.tawc.R
 import me.phie.tawc.ui.buildChildScreen
 import me.phie.tawc.ui.primaryButton
+import me.phie.tawc.ui.tawcText
 import me.phie.tawc.ui.verticalLp
 import java.io.File
 
@@ -46,10 +47,10 @@ class DirectoryPickerActivity : AppCompatActivity() {
         if (!currentPath.isDirectory) currentPath = File("/")
 
         scaffold = buildChildScreen(getString(R.string.title_directory_picker))
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_l)
 
         pathLabel = TextView(this).apply {
-            textSize = 14f
+            tawcText(R.style.TextAppearance_Tawc_Body)
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
@@ -100,9 +101,9 @@ class DirectoryPickerActivity : AppCompatActivity() {
     private fun dirRow(name: String, onClick: () -> Unit): TextView =
         TextView(this).apply {
             text = name
-            textSize = 16f
+            tawcText(R.style.TextAppearance_Tawc_CardTitle)
             typeface = Typeface.MONOSPACE
-            val pad = (12 * resources.displayMetrics.density).toInt()
+            val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_m)
             setPadding(pad / 2, pad, pad / 2, pad)
             // Standard pressed-state ripple so rows read as tappable.
             val tv = TypedValue()
@@ -114,8 +115,8 @@ class DirectoryPickerActivity : AppCompatActivity() {
     private fun noteRow(text: String): TextView =
         TextView(this).apply {
             this.text = text
-            textSize = 14f
-            val pad = (12 * resources.displayMetrics.density).toInt()
+            tawcText(R.style.TextAppearance_Tawc_Body)
+            val pad = resources.getDimensionPixelSize(R.dimen.tawc_space_m)
             setPadding(pad / 2, pad, pad / 2, pad)
         }
 

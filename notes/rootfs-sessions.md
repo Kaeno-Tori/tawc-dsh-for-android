@@ -19,11 +19,12 @@ There is exactly one place that knows how to enter a rootfs:
 
 | Caller | Path |
 |---|---|
-| In-app installer (Installer pipeline) | `method.runInside` → `MethodRunHelper.runInside` → `method.startInside` |
-| In-app launcher (LauncherActivity) | `UserRootfsSession.runInside` → `method.startInside` |
-| In-app command runner (DistroInfoActivity) | `UserRootfsSession.startInside` → `method.startInside` |
-| Host scripts (`rootfs-run.sh`, `run-integration-tests.sh`) | broker `RUNINSIDE` request → `UserRootfsSession.startInside` → `method.startInside` |
-| Integration tests (`rootfs_run`, `rootfs_spawn`) | same broker path |
+| In-app installer (Installer pipeline, package provisioners) | `method.runInside` → `MethodRunHelper.runInside` → `method.startInside` |
+| In-app command runner (DistroInfoActivity, Vulkan provisioning) | `RunCommandOp` / `VulkanProvisionOp` → `method.startInside` |
+| The agent (DshService) | `method.startInside` directly |
+| The dock terminal | `TawcrootMethod.ptyShellExec` (pty variant, same envelope) |
+| Host scripts (`rootfs-run.sh`, `run-integration-tests.sh`) | broker `RUNINSIDE` request → `method.startInside` |
+| Integration tests (`rootfs_run`, `rootfs_run_with`) | same broker path |
 
 `startInside` upholds the session invariant — `setsid` is built into
 the spawn for tawcroot/proot; chroot's `su` provides one implicitly.

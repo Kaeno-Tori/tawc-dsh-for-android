@@ -1,18 +1,13 @@
 # Android emulator support
 
-The compositor can run against an Android Studio AVD as well as a real
-device. Useful for iterating on non-GPU work (Wayland protocol logic,
-input, text-input/IME, window management) without needing the phone
-plugged in. libhybris work still has to run on a real aarch64 device;
-the emulator's GPU path is the experimental gfxstream bridge.
+DSH on Android can run against an Android Studio AVD as well as a real
+device. Useful for iterating on the app and the rootfs runtime without
+needing the phone plugged in. libhybris work still has to run on a real
+aarch64 device.
 
 ## What works
 - `adb` / `su` / chroot (Magisk grants `su` to adb shell, same SELinux
   context `u:r:magisk:s0` as a real device).
-- Installing / launching the compositor APK; compositor reaches the
-  event loop. (Smithay didn't support gfxstream's missing
-  `EGL_KHR_surfaceless_context` until our fork; see "Smithay patches"
-  in `notes/architecture.md` or the `tawc-patches` branch.)
 - The Arch chroot (x86_64 build).
 
 ## Known limitations
@@ -23,14 +18,8 @@ the emulator's GPU path is the experimental gfxstream bridge.
   The blocker is **not** missing GPU vendor blobs (the emulator
   does ship `libEGL_emulation.so`, `vulkan.ranchu.so`, gralloc/
   mapper) — see "libhybris on x86_64" below.
-  The **gfxstream bridge** is the default `GraphicsBackend` on x86_64
-  only because libhybris is unsupported there; it is experimental, not
-  production-ready. See [gfxstream-bridge.md](gfxstream-bridge.md). The
-  bridge build path is symmetric across aarch64/x86_64, and Vulkan
-  enumeration works on the AVD. End-to-end AHB presentation has passed
-  on physical hardware; AVD presentation still has open
-  host-gfxstream/driver blockers, and the GL path still needs Phase 6
-  (Zink-on-gfxstream-vk).
+  With no usable GPU backend there (libhybris can't load and there is
+  no kgsl device), `GraphicsBackend.DEFAULT` is `CPU` on x86_64.
 - Architecture is x86_64 (real device is aarch64). Most code doesn't
   care, but anything arch-specific won't transfer.
 
@@ -197,20 +186,7 @@ the only sound option if the audit fails, and it's strictly more
 code but has no soundness assumption to verify. (B) is a tempting
 trap; don't.
 
-Until somebody picks one up, libhybris stays aarch64-only. Emulator GPU
-work should use the gfxstream bridge instead of trying to port
-libhybris.
-
-**(D) Skip libhybris on the emulator entirely.** If we don't insist
-on libhybris-in-chroot, the entire (A)/(B)/(C) tree is moot: forward
-GL/Vulkan command streams from the chroot to an Android-side service
-that uses the AVD's native EGL/Vulkan. See
-[gfxstream-bridge.md](gfxstream-bridge.md). Same architecture works
-on physical aarch64 devices too, so this isn't an emulator-only
-escape hatch — it's a possible replacement for libhybris across the
-board. This is now implemented as the `gfxstream` backend for Vulkan;
-GL/Zink and AVD presentation validation are tracked in
-[gfxstream-bridge.md](gfxstream-bridge.md).
+Until somebody picks one up, libhybris stays aarch64-only.
 
 ## One-time setup
 
@@ -313,10 +289,11 @@ matching a real Magisk-rooted device.
     adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
     TAWC_TARGET=emulator scripts/tawc-exec.sh --foreground-app --action install --arg id=arch
 
-This installs the tawc app and triggers its in-app installer, which
+This installs the app and triggers its in-app installer, which
 downloads the Arch x86_64 bootstrap tarball, extracts it to
-`/data/data/me.phie.tawc/distros/arch/rootfs/`, configures pacman,
-and installs `base-devel` + Wayland + GTK3 inside the chroot. Takes a
+`/data/data/io.github.kaeno_tori.tawc_dsh/distros/arch/rootfs/`, configures
+pacman, and installs the base package set (`base-devel`, `git`,
+`python`, …) inside the chroot. Takes a
 few minutes the first time. Idempotent — re-running skips done steps
 (apart from a forced re-extract; uninstall + reinstall for a clean slate).
 
@@ -329,16 +306,13 @@ Two AVDs are supported:
   and /dev/null setup).
 - `tawc-rootless` — stock AVD, no Magisk.
   Useful for testing the tawcroot/proot install methods on a non-rooted
-  image. The chroot install method won't work. SHM client surfaces
-  render black on it, but that is the emulator GLES translator shader
-  bug (issues/emulator-shm-black-shader-translator.md), not SELinux —
-  verified 2026-07-06 that `setenforce 0` makes no difference for
-  tawcroot. (Despite the name, the google_apis image is userdebug and
-  ships AOSP `/system/xbin/su`, so `su 0 <cmd>` does work there — but
-  it rejects Magisk-style `su -c`, and app uids can't invoke it at
-  all, so the app's Su.kt ladder is dead on this AVD.
-  `run-integration-tests.sh` probes `su -c 'id -u'` and marks
-  root-requiring tests ignored via `--cfg tawc_skip_root_on_target`.)
+  image. The chroot install method won't work. (Despite the name, the
+  google_apis image is userdebug and ships AOSP `/system/xbin/su`, so
+  `su 0 <cmd>` does work there — but it rejects Magisk-style `su -c`,
+  and app uids can't invoke it at all, so the app's Su.kt ladder is
+  dead on this AVD. `run-integration-tests.sh` probes `su -c 'id -u'`
+  and marks root-requiring tests ignored via
+  `--cfg tawc_skip_root_on_target`.)
 
 To create the rootless AVD (one-time):
 
@@ -403,11 +377,11 @@ relying on the file mapping); ongoing disk writes drop to ~zero.
 Post-boot it also brings the AVD into a known-good state for tawc dev:
 
 - `setenforce 0` — rootAVD's Magisk has no `magiskpolicy` binary, so
-  the SELinux `type_transition` that lets the compositor mmap memfds
-  from chroot clients can't be installed; permissive mode is the
-  emulator-only workaround. Resets every reboot.
-- If `me.phie.tawc` is installed, grants Magisk `su` to its uid (so
-  `InstallationService` doesn't pop a prompt) and grants
+  the SELinux `type_transition` for chroot-client memfds can't be
+  installed; permissive mode is the emulator-only workaround. Resets
+  every reboot.
+- If `io.github.kaeno_tori.tawc_dsh` is installed, grants Magisk `su` to its
+  uid (so `InstallationService` doesn't pop a prompt) and grants
   `POST_NOTIFICATIONS` (so the install foreground-service notification
   displays). Both grants reset on emulator wipe; the `su` policy
   survives normal reboots, the notification grant survives upgrades.
@@ -415,12 +389,11 @@ Post-boot it also brings the AVD into a known-good state for tawc dev:
   the APK then re-run the script to apply them.
 - `settings put secure immersive_mode_confirmations confirmed` to
   suppress the fresh-AVD "swipe down to exit fullscreen" education
-  popup, which otherwise eats the first taps tests send.
+  popup.
 - `pm enable --user 0 com.google.android.inputmethod.latin` plus
-  `ime enable` / `ime set` makes Gboard the active IME. Older emulator
-  setup disabled it to avoid Gboard's stylus education dialog eating
-  stylus-tool-type taps. The script now keeps Gboard available but
-  forces Gboard's stylus path to show the normal keyboard by setting
+  `ime enable` / `ime set` makes Gboard the active IME. The script
+  keeps Gboard available but forces Gboard's stylus path to show the
+  normal keyboard by setting
   `enable_scribe=true` and `show_vk_devices_names` in Gboard's
   device-protected preferences. It also sets `disable_stylus_toolbar=true`
   and writes `settings put secure stylus_handwriting_enabled 0`.
@@ -470,19 +443,13 @@ so emulator-vs-device differences (skip libhybris-only mounts on
 emulator) just fall out of the runtime detection.
 
 ## SELinux on the emulator
-This section is **chroot-only**: tawcroot clients share the
-compositor's untrusted_app domain, and their SHM rendering is
-unaffected by SELinux state (verified 2026-07-06 — the tawcroot
-SHM-black symptom is the translator shader bug in
-issues/emulator-shm-black-shader-translator.md instead).
+This section is **chroot-only**.
 
 On a real device, `ChrootMounter` uses `magiskpolicy --live` to install
 a `type_transition` so that memfds the chroot's clients create get the
-`appdomain_tmpfs` label and the compositor (running as `untrusted_app`)
-can mmap them. rootAVD only patches the ramdisk — it never deploys the
-full Magisk userspace, so `magiskpolicy` doesn't exist on the AVD. The
-result: SHM client surfaces fail to render with an `avc: denied { write }`
-on a `tmpfs:s0` memfd in logcat.
+`appdomain_tmpfs` label. rootAVD only patches the ramdisk — it never
+deploys the full Magisk userspace, so `magiskpolicy` doesn't exist on
+the AVD.
 
 `scripts/emulator.sh start` works around this by running `setenforce 0`
 once the AVD finishes booting. It's emulator-only, resets on reboot,

@@ -12,7 +12,7 @@
 #   --graphics=list
 #              override production graphics backend set
 #
-# Output: app/build/outputs/apk/release/tawc-v<version>.apk
+# Output: app/build/outputs/apk/release/tawc-dsh-v<version>.apk
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +24,11 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 KEYSTORE_PATH="${KEYSTORE_PATH:-$HOME/Android/keystore.jks}"
 
 DO_BUILD=1
-GRAPHICS="${TAWC_RELEASE_GRAPHICS:-libhybris,cpu}"
+# Production ships libhybris (the historical fallback), turnip (the
+# aarch64 default since Mesa 26.2.2 — TAWC_DSH_DESIGN.md §11.1) and none
+# (the "no driver provisioned" state that the emulator's x86_64 default
+# lands on). turnip costs ~16 MB of APK for the driver plus the loader.
+GRAPHICS="${TAWC_RELEASE_GRAPHICS:-libhybris,turnip,none}"
 for arg in "$@"; do
     case "$arg" in
         --no-build) DO_BUILD=0 ;;
@@ -120,7 +124,7 @@ echo "=== Verifying ==="
 
 VERSION="$("$AAPT2" dump badging "$SIGNED" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)"
 [ -n "$VERSION" ] || { echo "ERROR: could not read versionName from $SIGNED" >&2; exit 1; }
-FINAL="$(dirname "$SIGNED")/tawc-v$VERSION.apk"
+FINAL="$(dirname "$SIGNED")/tawc-dsh-v$VERSION.apk"
 mv "$SIGNED" "$FINAL"
 
 echo

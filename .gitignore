@@ -13,15 +13,9 @@ target/
 # libhybris asset (built by the buildLibhybris Gradle task)
 app/src/main/assets/libhybris/
 
-# Xwayland asset (built by the buildXwayland Gradle task)
-app/src/main/assets/xwayland/
-
-# mesa-gfxstream asset (built by the buildMesaGfxstream Gradle task)
-app/src/main/assets/mesa-gfxstream/
-
-# mesa-zink asset (built by the buildMesaGfxstream Gradle task,
-# packed by packMesaZink — see notes/libhybris-zink.md)
-app/src/main/assets/mesa-zink/
+# turnip asset (built by the buildTurnip Gradle task, packed by
+# packTurnip — see scripts/build-turnip.sh)
+app/src/main/assets/turnip/
 
 # IDE
 .idea/

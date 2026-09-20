@@ -50,7 +50,25 @@ internal object AptCommon {
         "libwayland-server0",
         "systemd-standalone-sysusers",
         "systemd-standalone-tmpfiles",
+        // The "can I work in here" set — see
+        // `ArchPacmanCommon.DEFAULT_BASE_PACKAGES` for why each of these
+        // is here. Debian renames two of them: the SSH *client* is its
+        // own binary package (there is no `openssh`), and the build
+        // toolchain meta is `build-essential`.
+        "git",
+        "less",
+        "nano",
+        "openssh-client",
+        "python3",
+        "build-essential",
     )
+
+    /**
+     * Node runtime + npm. Debian ships `npm` as its own binary package
+     * (built from the npm source package), so unlike Void both names
+     * are needed.
+     */
+    val RUNTIME_PACKAGES: List<String> = listOf("nodejs", "npm")
 
     fun configure(
         method: InstallationMethod,
@@ -132,7 +150,7 @@ internal object AptCommon {
         }
     }
 
-    fun installBasePackages(
+    fun installPackages(
         method: InstallationMethod,
         rootfs: String,
         packages: List<String>,
@@ -152,7 +170,7 @@ internal object AptCommon {
             onLine = filteringLog(log),
         )
         if (!res.ok) {
-            throw IOException("apt base-package install failed (exit=${res.exitCode})")
+            throw IOException("apt package install failed (exit=${res.exitCode})")
         }
     }
 

@@ -28,7 +28,7 @@ import java.time.Instant
  * signed repo metadata by running **real debootstrap on-device**,
  * replacing the tarball path's download/verify/extract stages. The
  * flavor-agnostic tail (`configure → TawcInstaller →
- * initPackageManager → installBasePackages`) runs unchanged after
+ * initPackageManager → installPackages`) runs unchanged after
  * this returns. Design + trust analysis: notes/installation.md
  * "Bootstrap flavors".
  *

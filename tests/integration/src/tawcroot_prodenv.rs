@@ -11,7 +11,7 @@
 //! are pure data that tawcroot's manual ELF loader mmaps.
 //!
 //! The fake rootfs is staged into app-private cache
-//! (`/data/data/me.phie.tawc/cache/tawcroot-prodtest/`) through the
+//! (`/data/data/io.github.kaeno_tori.tawc_dsh/cache/tawcroot-prodtest/`) through the
 //! broker (`sh -c 'cat > …'` per file, app-owned), so uninstall — or
 //! Android clearing the cache — removes it. Staging re-runs from
 //! scratch once per test-binary invocation.
@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use crate::exec_broker::{self, Invocation, Request};
 
 /// Device-side staging root. App cache: app-owned, uninstall-cleaned.
-const STAGE_DIR: &str = "/data/data/me.phie.tawc/cache/tawcroot-prodtest";
+const STAGE_DIR: &str = "/data/data/io.github.kaeno_tori.tawc_dsh/cache/tawcroot-prodtest";
 
 /// Guest programs staged into the fake rootfs at `/bin/<name>`.
 /// All are freestanding static fixtures except `dynamic_exit42`,

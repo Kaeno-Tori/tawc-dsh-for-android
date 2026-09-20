@@ -6,9 +6,9 @@
 # Use scripts/update-deps.sh when a checkout must be moved to a new pin.
 #
 # Usage:
-#   scripts/ensure-deps.sh smithay
-#   scripts/ensure-deps.sh smithay rutabaga_gfx
-#   scripts/ensure-deps.sh --patches rutabaga_gfx deps/rutabaga-patches/rutabaga_gfx
+#   scripts/ensure-deps.sh cleat
+#   scripts/ensure-deps.sh libhybris cleat
+#   scripts/ensure-deps.sh --patches cleat deps/cleat-patches/cleat
 #   scripts/ensure-deps.sh --verify-all   # check every existing checkout, clone nothing
 #   scripts/ensure-deps.sh --tree-state <name|dest-prefix/>...
 #       # print a working-tree fingerprint per dep (read-only; Gradle

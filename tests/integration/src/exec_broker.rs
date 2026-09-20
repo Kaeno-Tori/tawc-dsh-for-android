@@ -8,18 +8,15 @@
 
 use std::env;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-const SOCKET_NAME: &str = "me.phie.tawc.exec";
+const SOCKET_NAME: &str = "io.github.kaeno_tori.tawc_dsh.exec";
 
 const STREAM_STDIN: u8 = 0;
 const STREAM_STDOUT: u8 = 1;
@@ -31,7 +28,7 @@ const STREAM_ERR: u8 = 5;
 pub fn print_usage() {
     eprintln!("usage: tawc-exec [--foreground-app] [--cwd DIR] [--env K=V ...] [--op-title TITLE] -- ARGV0 [ARG ...]");
     eprintln!("       tawc-exec [--foreground-app] --action NAME [--arg K=V ...]");
-    eprintln!("       tawc-exec [--foreground-app] --in-rootfs ID [--graphics libhybris|gfxstream|cpu|libhybris-zink] [--op-title TITLE] [-- CMD ...]");
+    eprintln!("       tawc-exec [--foreground-app] --in-rootfs ID [--graphics libhybris|turnip|cpu] [--op-title TITLE] [-- CMD ...]");
 }
 
 /// Top-level invocation kind. Mirrors the wire protocol: an ARGV-form
@@ -56,8 +53,8 @@ pub enum Request {
     /// Run a command inside an installed chroot. The broker dispatches
     /// to the install's [InstallationMethod.startInside]. `cmd` empty =
     /// interactive `bash -l`. `graphics` non-empty overrides the
-    /// in-rootfs `GraphicsBackend` for this spawn (libhybris / gfxstream
-    /// / cpu / libhybris-zink) without touching the user's persisted Settings pick;
+    /// in-rootfs `GraphicsBackend` for this spawn (libhybris / turnip /
+    /// cpu) without touching the user's persisted Settings pick;
     /// empty means "use Settings". Tests use this to run a single
     /// client under a specific backend.
     RunInside {
@@ -280,112 +277,6 @@ pub fn run_capture_with_input(invocation: Invocation, input: &[u8]) -> io::Resul
     })
 }
 
-pub type BrokerPipe = UnixStream;
-
-pub struct BrokerChild {
-    stdout: Option<BrokerPipe>,
-    stderr: Option<BrokerPipe>,
-    control: Option<TcpStream>,
-    exit_rx: mpsc::Receiver<io::Result<i32>>,
-    reader: Option<thread::JoinHandle<()>>,
-    cancel: Arc<AtomicBool>,
-    _fwd: Option<AdbForward>,
-}
-
-impl BrokerChild {
-    pub fn take_stdout(&mut self) -> Option<BrokerPipe> {
-        self.stdout.take()
-    }
-
-    pub fn take_stderr(&mut self) -> Option<BrokerPipe> {
-        self.stderr.take()
-    }
-
-    pub fn kill(&mut self) -> io::Result<()> {
-        self.cancel.store(true, Ordering::Relaxed);
-        if let Some(control) = self.control.take() {
-            control.shutdown(Shutdown::Both)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
-        let code = self
-            .exit_rx
-            .recv()
-            .map_err(|_| io::Error::other("broker session ended without an exit status"))??;
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        Ok(exit_status_from_broker(code))
-    }
-
-    pub fn wait_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> io::Result<Option<std::process::ExitStatus>> {
-        match self.exit_rx.recv_timeout(timeout) {
-            Ok(code) => {
-                let code = code?;
-                if let Some(reader) = self.reader.take() {
-                    let _ = reader.join();
-                }
-                Ok(Some(exit_status_from_broker(code)))
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-                "broker session ended without an exit status",
-            )),
-        }
-    }
-
-    pub fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        match self.exit_rx.try_recv() {
-            Ok(code) => {
-                let code = code?;
-                if let Some(reader) = self.reader.take() {
-                    let _ = reader.join();
-                }
-                Ok(Some(exit_status_from_broker(code)))
-            }
-            Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(io::Error::other(
-                "broker session ended without an exit status",
-            )),
-        }
-    }
-}
-
-pub fn spawn(invocation: Invocation) -> io::Result<BrokerChild> {
-    let (mut sock, fwd) = connect(&invocation)?;
-    let control = sock.try_clone()?;
-    sock.set_read_timeout(Some(std::time::Duration::from_millis(50)))?;
-    let (stdout_read, stdout_write) = UnixStream::pair()?;
-    let (stderr_read, stderr_write) = UnixStream::pair()?;
-    let (exit_tx, exit_rx) = mpsc::channel();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let reader_cancel = cancel.clone();
-
-    let eof = [STREAM_STDIN_EOF, 0, 0, 0, 0];
-    let _ = sock.write_all(&eof);
-
-    let reader = thread::spawn(move || {
-        let result = pump_pipes(sock, stdout_write, stderr_write, reader_cancel);
-        let _ = exit_tx.send(result);
-    });
-
-    Ok(BrokerChild {
-        stdout: Some(stdout_read),
-        stderr: Some(stderr_read),
-        control: Some(control),
-        exit_rx,
-        reader: Some(reader),
-        cancel,
-        _fwd: fwd,
-    })
-}
-
 fn connect(invocation: &Invocation) -> io::Result<(TcpStream, Option<AdbForward>)> {
     let serial = env::var("ANDROID_SERIAL").ok();
 
@@ -507,7 +398,17 @@ fn start_main_activity(serial: Option<&str>) -> io::Result<()> {
         if let Some(s) = serial {
             start.args(["-s", s]);
         }
-        start.args(["shell", "am", "start", "-n", "me.phie.tawc/.MainActivity"]);
+        // Fully qualified, not `io.github.kaeno_tori.tawc_dsh/.MainActivity`:
+        // this app's namespace (me.phie.tawc) deliberately differs from
+        // its applicationId, and the shorthand expands against the
+        // *applicationId*, so it resolves to a class that doesn't exist.
+        start.args([
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "io.github.kaeno_tori.tawc_dsh/me.phie.tawc.MainActivity",
+        ]);
         let out = start.output()?;
         // `am start` exits 0 but prints `Error:` for some failures
         // (e.g. unresolvable intent); treat those as failures too.
@@ -590,7 +491,7 @@ fn write_header(s: &mut TcpStream, p: &Request) -> io::Result<()> {
                 h.push('\n');
             }
             // GRAPHICS key is a programmatic identifier (libhybris /
-            // gfxstream / cpu / libhybris-zink); no encoding needed.
+            // turnip / cpu); no encoding needed.
             if let Some(g) = graphics {
                 h.push_str("GRAPHICS ");
                 h.push_str(g);
@@ -785,105 +686,6 @@ fn pump_capture(mut sock: TcpStream) -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
     Ok((exit_code, stdout, stderr))
 }
 
-fn pump_pipes(
-    mut sock: TcpStream,
-    mut stdout: UnixStream,
-    mut stderr: UnixStream,
-    cancel: Arc<AtomicBool>,
-) -> io::Result<i32> {
-    let mut exit_code: i32 = -2;
-    'recv: loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(-1);
-        }
-        let mut hdr = [0u8; 5];
-        match read_exact_cancelable(&mut sock, &mut hdr, &cancel) {
-            Ok(()) => {}
-            // Cancel first: kill() shuts the socket down, which can
-            // surface as EOF, ECONNRESET, or the Interrupted marker
-            // depending on where the read was — all mean "cancelled".
-            Err(_) if cancel.load(Ordering::Relaxed) => return Ok(-1),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e),
-        }
-        let stream = hdr[0];
-        let len = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
-        if len > 16 * 1024 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("frame too large: stream={stream} len={len}"),
-            ));
-        }
-        let mut payload = vec![0u8; len];
-        match read_exact_cancelable(&mut sock, &mut payload, &cancel) {
-            Ok(()) => {}
-            // kill() can land mid-payload (chatty children make this
-            // likely): both the cancel flag and the socket shutdown it
-            // triggers must count as a normal cancel, not an error.
-            Err(_) if cancel.load(Ordering::Relaxed) => return Ok(-1),
-            Err(e) => return Err(e),
-        }
-        match stream {
-            STREAM_STDOUT => stdout.write_all(&payload)?,
-            STREAM_STDERR | STREAM_ERR => stderr.write_all(&payload)?,
-            STREAM_EXIT => {
-                if payload.len() != 4 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("exit frame payload len={}", payload.len()),
-                    ));
-                }
-                exit_code = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                break 'recv;
-            }
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unexpected server stream {other}"),
-                ));
-            }
-        }
-    }
-    Ok(exit_code)
-}
-
-fn read_exact_cancelable(
-    s: &mut TcpStream,
-    buf: &mut [u8],
-    cancel: &AtomicBool,
-) -> io::Result<()> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        match s.read(&mut buf[filled..]) {
-            Ok(0) => {
-                if filled == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "eof at frame boundary",
-                    ));
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "eof mid-frame",
-                ));
-            }
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                continue
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
 /// True if the tawc app process is alive on the device. Uses `pidof`
 /// over plain `adb shell` (no privilege needed — pidof walks /proc).
 fn app_running(serial: Option<&str>) -> bool {
@@ -891,7 +693,7 @@ fn app_running(serial: Option<&str>) -> bool {
     if let Some(s) = serial {
         cmd.args(["-s", s]);
     }
-    cmd.args(["shell", "pidof", "me.phie.tawc"]);
+    cmd.args(["shell", "pidof", "io.github.kaeno_tori.tawc_dsh"]);
     cmd.output()
         .map(|o| o.stdout.iter().any(|b| b.is_ascii_digit()))
         .unwrap_or(false)

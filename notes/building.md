@@ -1,4 +1,4 @@
-# Building tawc
+# Building tawc-dsh
 
 > **Source of truth for build dependencies and the fresh-system build flow.**
 > Keep this file in sync with the `scripts/build-*.sh` scripts and Gradle config.
@@ -36,27 +36,22 @@ and launch as documented in AGENTS.md's Common Commands.
 |-----------|--------------------------------------------------------|------------------------------------------------------|
 | JDK 21    | `jdk21-openjdk`                                        | `openjdk-21-jdk`                                     |
 | Rust      | `rustup` — the version is pinned by `rust-toolchain.toml` at the repo root (currently 1.93.0), so rustup installs it on first build; no `rustup default` needed | `rustup` (a real Debian/Ubuntu package since trixie; rustup.rs works too) |
-| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | Both Android targets are listed in `rust-toolchain.toml`, so rustup adds them automatically. Manually: `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds). The kumquat server is a Cargo dep of the compositor crate (`target_os="android"`-gated), so the same target also covers the gfxstream-bridge build; no extra toolchain. | same |
-| Rust glibc targets (`build-mesa-gfxstream.sh` cross-builds Mesa's gfxstream-vk Rust pieces) | `rustup target add aarch64-unknown-linux-gnu` (and `rustup target add x86_64-unknown-linux-gnu` for the emulator bridge) | same |
-| `bindgen` (Mesa's gfxstream-vk meson Rust bindings) | `cargo install bindgen-cli` | same |
+| Rust Android targets (`error[E0463]: can't find crate for \`core\`` if missing) | Both Android targets are listed in `rust-toolchain.toml`, so rustup adds them automatically. Manually: `rustup target add aarch64-linux-android` (add `x86_64-linux-android` for emulator builds). They cover the `andobridge` JNI library Gradle cross-builds for the APK. | same |
 | Cargo NDK (cargo subcommand — `cargo build` will fail with `error: no such command: ndk` if missing) | `cargo install cargo-ndk --version 4.1.2 --locked` (known-good; `cargo install cargo-ndk` for latest) | same |
 | Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. Android platform API 36 is required by `compileSdk`; NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). The SDK's `cmdline-tools` (for `apkanalyzer`, used by `scripts/check-no-dev-code.sh` on the release APK) and `build-tools` (zipalign/apksigner/aapt2) are both needed for `scripts/build-release-apk.sh`. | same |
 | Build basics | `base-devel`                                        | `build-essential pkg-config curl libarchive-tools`   |
-| Meson + Ninja (libxkbcommon) | `meson ninja`                            | `meson ninja-build`                                  |
-| `bison` (libxkbcommon's meson build and xkbcomp's `AC_PROG_YACC`) | in `base-devel`         | `bison`                                              |
+| Meson + Ninja (Turnip) | `meson ninja`                            | `meson ninja-build`                                  |
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev libwayland-egl-backend-dev wayland-protocols` (Arch's `wayland` carries `wayland-egl-backend.h`; Debian splits it out, and libhybris's wayland EGL platform includes it) |
-| Host sysroot + test app builds | `curl libarchive wayland` | `curl libarchive-tools libwayland-dev` |
-| Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool libtool-bin` (Debian ships the `libtool` binary itself in `libtool-bin`, and `build-libhybris.sh`/`build-xwayland.sh` check for it) |
-| `ltdl.m4` autoconf macros (libffi's `LT_SYS_SYMBOL_USCORE`, in the Xwayland dep chain) | in `libtool` | `libltdl-dev`                                        |
+| Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool libtool-bin` (Debian ships the `libtool` binary itself in `libtool-bin`, and `build-libhybris.sh` checks for it) |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
 | X11/xcb headers (libhybris's X11 EGL platform, `eglplatform_x11.so`) | `libx11 libxcb`   | `libx11-dev libx11-xcb-dev libxcb1-dev`              |
 | `patchelf` (libhybris GL shims) | `patchelf`                  | `patchelf`                                           |
 | `file` (libhybris build verify step) | `file`                 | `file`                                               |
 | nginx (dev-time mirror cache, optional) | `nginx`                       | `nginx`                                              |
 
-On a clean Debian trixie the whole set is one line — the same set the
-F-Droid recipe installs, verified by building a release APK from scratch
-in a container with none of it preinstalled:
+On a clean Debian trixie the whole set is one line — verified by building
+a release APK from scratch in a container with none of it
+preinstalled:
 
 ```bash
 apt install git openjdk-21-jdk rustup build-essential make pkg-config curl \
@@ -71,14 +66,13 @@ cargo install cargo-ndk --version 4.1.2 --locked
 
 Three of those are easy to miss when the packaging differs from Arch's,
 and each one fails deep into a cross-build rather than up front:
-`bison` and `libtool-bin` (Arch folds both into `base-devel`),
-`libwayland-egl-backend-dev` and `libltdl-dev` (Arch keeps both inside
-`wayland` and `libtool`), and the `-dev` split for X11/xcb, which Arch
-does not have at all.
+`libtool-bin` (Arch folds it into `base-devel`),
+`libwayland-egl-backend-dev` (Arch keeps it inside `wayland`), and the
+`-dev` split for X11/xcb, which Arch does not have at all.
 
-That line covers the `libhybris,cpu` graphics set. The gfxstream and
-libhybris-zink backends additionally need `bindgen` and the Mesa/sysroot
-tooling described below; `proot` builds its own talloc.
+That line covers all three graphics members (`libhybris`, `turnip`,
+`none` — the last is the no-driver state, not a backend). `proot` builds
+its own talloc.
 
 JDK 26 is **not** supported for running this Gradle build — Gradle 8.12's
 embedded Kotlin stack crashes while parsing Java version `26.0.1`. The repo
@@ -100,52 +94,12 @@ don't iterate on installs.
 
 The toolchain produces aarch64 **glibc** binaries. We do **not** use the
 NDK for libhybris because libhybris is glibc-side by design (its
-`hooks.c` exports glibc-shaped symbols and is loaded by glibc Wayland
-clients inside the chroot — see `notes/gpu-strategy.md`). The NDK
+`hooks.c` exports glibc-shaped symbols and is loaded by glibc programs
+inside the chroot — see `notes/gpu-strategy.md`). The NDK
 targets bionic and is the wrong toolchain.
 
-For the rest of our native build (the Rust compositor, libxkbcommon),
-the NDK is correct and we keep using it.
-
-### x86_64 glibc compiler (mesa-gfxstream for the emulator)
-
-`scripts/build-mesa-gfxstream.sh --abi=x86_64` cross-builds the
-chroot-side gfxstream Vulkan ICD for the AVD's x86_64 rootfs. Since
-the build host is also x86_64-glibc, this is technically a "native"
-build — the system `gcc`/`g++` (Arch: `base-devel`; Debian/Ubuntu:
-`build-essential`; Fedora: `gcc gcc-c++`) is the right compiler. The
-script prefers the triple-prefixed names (`x86_64-linux-gnu-gcc`,
-which Debian ships by default) when present and falls back to plain
-`gcc` otherwise. No separate cross-toolchain is needed.
-
-### Host sysroots (per-ABI)
-
-Both `--abi=aarch64` and `--abi=x86_64` cross-builds of
-`build-mesa-gfxstream.sh` link `libvulkan_gfxstream.so` against a
-small distro sysroot under `build/sysroots/<distro>-<arch>/`. The
-canonical builder is:
-
-```bash
-scripts/build-host-sysroot.sh --abi=aarch64 --distro=arch --profile=prod
-scripts/build-host-sysroot.sh --abi=x86_64 --distro=arch --profile=prod
-```
-
-`build-mesa-gfxstream.sh` runs this automatically when its production
-sysroot is missing or lacks Mesa's required Wayland protocol XMLs.
-`tests/apps/Makefile` uses the same script with `--profile=full`, which
-pulls the Cairo/Wayland/X11 header and pkg-config closure needed to
-build test clients on the host. There is no device-rootfs sysroot pull
-path anymore.
-
-Default distro is Arch (`TAWC_SYSROOT_DISTRO=arch`). `void` support uses
-`xbps-install` when that host tool is available. The builder keeps a
-compatibility link at `build/<arch>-sysroot` for older build consumers.
-For non-production profiles (`--profile=full`, used by test apps), distro
-package downloads go through the dev mirror cache by default
-(`http://127.0.0.1:8080/proxy/`); run `scripts/cache-proxy.sh run` first
-or set `TAWC_MIRROR_PROXY` explicitly. Pacman repo databases are fetched
-directly on each sysroot build so stale cached metadata cannot reference
-package archives that have already rolled off the mirror.
+For the rest of our native build (proot, tawcroot, the ando client, and
+the `andobridge` Rust library) the NDK is correct and we keep using it.
 
 ## Environment variables
 
@@ -170,7 +124,7 @@ export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
 
 `scripts/build-app.sh` sets `JAVA_HOME` and `ANDROID_HOME` to the defaults
 above when they are unset. `ANDROID_NDK_HOME` is auto-detected by
-`scripts/build-libxkbcommon.sh`
+`scripts/build-proot.sh`
 (it falls back to `$ANDROID_HOME/ndk/<latest>`). Direct `./gradlew` invocations
 use the repo's Gradle daemon JVM pin and require JDK 21 to be installed.
 
@@ -195,7 +149,7 @@ configuration cache records its output as an input and re-verifies pins
 even on cache-hit builds.
 
 Dep-built artifacts also track checkout *content*: every dep-artifact
-Gradle task (`buildLibhybris`, `buildXwayland*`, …) declares
+Gradle task (`buildLibhybris`, `buildProot`, `buildTurnip`, …) declares
 `scripts/ensure-deps.sh --tree-state <dep|dest-prefix/>...` — HEAD plus
 a hash of tracked-file edits per consumed dep — as an input property,
 so local edits in a dep tree, and their later discard by
@@ -218,35 +172,30 @@ alone.
 |---------------------------------------|-----------------------------------------------|
 | `./deps/libhybris/`                        | `scripts/build-libhybris.sh`              |
 | `./deps/android-headers/`                  | `scripts/build-libhybris.sh`              |
-| `./deps/libxkbcommon/`                     | `scripts/build-libxkbcommon.sh`                   |
 | `./deps/proot/` (+ `./deps/proot-deps/talloc-*` tarball) | `scripts/build-proot.sh`                |
 | `./deps/cleat/`                            | `tawcroot/build.sh` (host + device test runners) |
-| `./deps/termux-app/`                       | Gradle included projects `:terminal-emulator` + `:terminal-view` (in-app terminal; ensured at settings-evaluation time by `settings.gradle.kts`) |
-| `./deps/xwayland-src/<lib>/` (~22 repos)   | `scripts/build-xwayland.sh`               |
-| `./deps/smithay/`                     | Rust compositor (`scripts/ensure-deps.sh smithay`; consumed via `[patch.crates-io]` path in `compositor/Cargo.toml`) |
-| `./deps/mesa/`                             | `scripts/build-mesa-gfxstream.sh` (gfxstream-vk and Mesa-Zink assets) |
-| `./deps/gfxstream/`                        | `scripts/build-gfxstream-backend.sh`      |
-| `./deps/rutabaga_gfx/`                     | `scripts/ensure-deps.sh --patches rutabaga_gfx deps/rutabaga-patches/rutabaga_gfx`; Rust compositor kumquat server dep |
+| `./deps/termux-app/`                       | Gradle included projects `:terminal-emulator`, `:terminal-view` and `:termux-extrakeys` (in-app terminal; ensured at settings-evaluation time by `settings.gradle.kts`) |
+| `./deps/debootstrap/`                      | `scripts/ensure-deps.sh debootstrap`; packed into an asset by Gradle's `packDebootstrap` |
+| `./deps/mesa-turnip/`                      | `scripts/build-turnip.sh` (the freedreno Vulkan driver) |
 
-Two tarball deps (`talloc`, `libmd`) are *not* in `deps.list` — they
-ship as release tarballs, not git repos, so their pin is a
-version + sha256 pair in the build script itself:
+One tarball dep (`talloc`) is *not* in `deps.list` — it ships as a
+release tarball, not a git repo, so its pin is a version + sha256 pair
+in the build script itself:
 
 | Dep     | Pinned in                    | Variables                              |
 |---------|------------------------------|----------------------------------------|
-| `libmd` | `scripts/build-xwayland.sh`  | `LIBMD_VERSION`, `LIBMD_SHA256`        |
 | `talloc`| `scripts/build-proot.sh`     | `TALLOC_VERSION`, `TALLOC_SHA256`      |
 
-Both go through `dep_fetch_tarball <url> <sha256> <dest>` from
+It goes through `dep_fetch_tarball <url> <sha256> <dest>` from
 `scripts/lib/deps.sh`, which downloads when the file is absent and
 verifies the hash every time — so a truncated or tampered cached
-download fails as loudly as a fresh bad one. To bump either, change the
+download fails as loudly as a fresh bad one. To bump it, change the
 version and the hash together; the mismatch error tells you the hash it
 actually got.
 
-The *extracts* are still not re-verified after unpacking: hand edits or
-corruption in a `talloc-*`/`libmd` tree are invisible until the next
-version bump (accepted — delete the extract to force a clean re-fetch).
+The *extract* is still not re-verified after unpacking: hand edits or
+corruption in a `talloc-*` tree are invisible until the next version
+bump (accepted — delete the extract to force a clean re-fetch).
 
 ### Bumping a dep
 
@@ -295,20 +244,6 @@ install afterwards — debootstrap is unpatched by design; if a local
 patch ever becomes necessary, fork like libhybris rather than sedding
 at build time.
 
-### libxkbcommon (static .a → linked into compositor)
-
-Cross-built once per ABI. NDK clang against bionic.
-
-```bash
-scripts/build-libxkbcommon.sh                  # aarch64 (default)
-scripts/build-libxkbcommon.sh --abi=x86_64     # emulator
-scripts/build-libxkbcommon.sh --abi=both
-scripts/build-libxkbcommon.sh --clean          # wipe builddir(s)
-```
-
-Output: `deps/libxkbcommon/builddir{,-x86_64}/libxkbcommon.a`. Linked into
-`libcompositor.so` via `compositor/build.rs`.
-
 ### libhybris (shared .so set → ships in APK as asset)
 
 Cross-built once. aarch64-linux-gnu-gcc against glibc.
@@ -335,17 +270,17 @@ only resolve when builddir == srcdir. `--clean` runs `make distclean`
 on the source tree.
 
 Bundled into the APK by the Gradle `packLibhybris` task as
-`app/src/main/assets/libhybris/arm64-v8a.tar`. Extracted at
-first compositor start by `CompositorService.ensureLibhybrisExtracted`,
-then exposed in each rootfs at `/usr/lib/hybris/` — bound RO under
-tawcroot, copied by `TawcInstaller`/`LibhybrisInstallProvider` under
-proot/chroot (at install time and on first app start after an APK
-upgrade).
+`app/src/main/assets/libhybris/arm64-v8a.tar`. Extracted to
+`<filesDir>/libhybris/` by `TawcAssets.ensureLibhybrisExtracted` —
+called from `TawcInstaller` during install / APK upgrade and from
+`TawcrootMethod` on every spawn — then exposed in each rootfs at
+`/usr/lib/hybris/`: bound RO by `TawcrootMethod` under tawcroot, copied
+by `LibhybrisInstallProvider` under proot/chroot.
 End-to-end automatic — no manual steps after `scripts/build-app.sh`.
 
 #### Why the cross-compile and not the NDK
 
-libhybris is loaded by glibc Wayland clients in the chroot. Its
+libhybris is loaded by glibc programs in the chroot. Its
 `hooks.c` exports glibc-shaped wrappers (e.g. `__sprintf_chk`,
 `pthread_attr_setstackaddr`, `valloc`) for the bionic vendor blobs
 it loads via its embedded Android linker (`libhybris/linker/q.so`).
@@ -376,93 +311,73 @@ under gcc 15 (a `format string` mismatch the upstream code never
 fixed); skipping it avoids the build break in code we don't ship.
 The build script invokes `make` per-subdir to control this.
 
-### libvulkan_gfxstream.so (Mesa gfxstream-vk → ships in APK as asset, gfxstream-bridge GPU path)
+#### Headless Vulkan platform plugin (`vulkanplatform_null.so`)
 
-Cross-built once per enabled ABI. `aarch64` uses the same
-`aarch64-linux-gnu` toolchain as libhybris; `x86_64` uses the host
-glibc compiler. Builds with `-Dvirtgpu_kumquat=true` enabled — Mesa
-patches in `deps/mesa-patches/mesa/` add a meson option that
-sidesteps the in-tree Rust subproject build (which doesn't
-cross-compile cleanly) by linking to a separately-cargo-built
-`libvirtgpu_kumquat_ffi.a` via pkg-config. Output .so is ~7MB.
+The build overwrites libhybris's autotools-built
+`libhybris/vulkanplatform_null.so` with one compiled from
+`deps/libhybris-shims/vulkanplatform_null.c`.
 
-Pre-req: make sure the host sysroot exists. The Mesa build script does
-this automatically, but the standalone command is:
+libhybris's `libvulkan.so.1` won't make a Vulkan call until
+`hybris/vulkan/ws.c` has dlopen'd `vulkanplatform_$HYBRIS_VULKANPLATFORM.so`,
+and that variable defaults to `wayland`. Upstream's `null` plugin is the
+headless answer, but its Makefile links `$(WAYLAND_SERVER_LIBS)`
+unconditionally, plus `libgralloc` and `libhybris-vulkanplatformcommon`
+(which in turn DT_NEEDEDs wayland-client/server and libsync) — so even
+the null plugin needs glibc Wayland in the chroot. Without it `_init_ws()`
+assert()s and every Vulkan client dies before logging anything
+(TAWC_DSH_DESIGN.md §11.1). `RootfsEnv` sets `HYBRIS_VULKANPLATFORM=null`
+for the LIBHYBRIS backend, so this copy is the plugin that actually loads.
 
-```bash
-scripts/build-host-sysroot.sh --abi=aarch64 --profile=prod
-scripts/build-mesa-gfxstream.sh
-scripts/build-mesa-gfxstream.sh --abi=x86_64
-scripts/build-mesa-gfxstream.sh --clean   # wipe builddir
-```
+Ours is the same pass-through as upstream's with those links dropped:
+`DT_NEEDED` is `libc.so.6` alone. The path is compute-only by design (no
+WSI, no swapchain), so the three Wayland surface entry points in
+`struct ws_module` stay stubs returning `VK_ERROR_OUT_OF_HOST_MEMORY` /
+`VK_FALSE`, exactly as upstream leaves them.
 
-Output: `build/mesa-<arch>/install/usr/lib/gfxstream/libvulkan_gfxstream.so`
-+ `.../gfxstream_vk_icd.<arch>.json` (co-located, no separate
-`share/vulkan/icd.d/` - `VK_ICD_FILENAMES` points at it explicitly).
-Bundled into the APK by Gradle's `packMesaGfxstream<Abi>` and exposed
-in every rootfs at `/usr/lib/gfxstream/` (tawcroot RO bind;
-`BridgeInstallProvider` copy under proot/chroot). The same script also builds
-the optional Mesa-Zink tarball consumed by `libhybris-zink` unless
-Gradle passes `--no-zink` via `-PtawcGraphics=...`. Passing
-`--no-gfxstream` builds only Mesa-Zink; passing both `--no-gfxstream`
-and `--no-zink` is rejected because there is no Mesa output to build.
-Mesa's `wayland-protocols` XML comes from the pinned
-`deps/xwayland-src/wayland-protocols` checkout, not the host sysroot.
-That keeps Mesa's generated protocol inputs in sync with the Mesa
-source even when distro sysroot packages lag.
+Two details are load-bearing:
 
-### Xwayland (binary + libs → ships in APK as asset)
+- `-I"$BUILD_DIR"`: `ws.h`'s `struct ws_module` layout is gated on
+  `WANT_WAYLAND` from the libhybris `config.h`. Compile against a
+  different config and the member offsets shift, so libhybris calls the
+  wrong slot.
+- `-idirafter` for the host wayland/vulkan include dirs, same reason the
+  libhybris build itself needs it (see above).
 
-Cross-built per APK ABI. NDK clang against bionic — same toolchain as
-the Rust compositor. APK builds include it by default for every enabled
-ABI; pass `-PtawcXwayland=false` to Gradle or
-`--no-xwayland` to `scripts/build-app.sh` / `scripts/app-build-install.sh`
-to skip building, packaging, extracting, and spawning it.
+The script gates the result: `readelf -d` must show no `libwayland*`,
+`libgralloc` or `libhybris*` in `DT_NEEDED`.
+
+### Turnip (freedreno Vulkan ICD + loader → ships in APK as assets)
 
 ```bash
-scripts/build-xwayland.sh           # incremental
-scripts/build-xwayland.sh --abi=x86_64
-scripts/build-xwayland.sh --clean   # wipe install + builddirs
-scripts/build-xwayland.sh --only=libx11   # rebuild one stage
+scripts/build-turnip.sh                 # incremental
+scripts/build-turnip.sh --clean         # wipe the meson + staged trees
 ```
 
-Output: `build/xwayland-<abi>/install/{bin/Xwayland,bin/xkbcomp,lib,share}`.
-Gradle's `stageXwaylandJniLibs<Abi>` task copies the binaries + `.so` deps
-into `app/src/main/jniLibs/<abi>/lib*.so` (so untrusted_app can
-exec them out of `nativeLibraryDir`), and `packXwaylandShare` tars
-the XKB data tree into `assets/xwayland/share.tar`.
-`CompositorService.ensureXwaylandExtracted` extracts the share tar
-and lays down `<filesDir>/xwayland/bin/{Xwayland,xkbcomp}` symlinks
-into `nativeLibraryDir`.
+Output: `build/turnip-aarch64/install/usr/lib/turnip/` holding
+`libvulkan_freedreno.so` (Mesa 26.2.2, `-Dfreedreno-kmds=kgsl`),
+`freedreno_icd.json` with `library_path` baked to that guest path, and
+`libvulkan.so.1` — the Vulkan loader, lifted from Arch Linux ARM's
+`vulkan-icd-loader` (resolved out of the mirror's repo database, not by
+filename). aarch64 only. Bundled into the APK by Gradle's `packTurnip`
+and exposed in every rootfs at `/usr/lib/turnip/` (tawcroot RO bind;
+`TurnipInstallProvider` copy under proot/chroot).
 
-Host packages (in addition to the always-required set above): `perl`
-(needed by xorgproto/libxcb/font-util autotools macros), expat
-headers (`expat` / `libexpat1-dev`, for the native wayland-scanner
-below), and libltdl's autoconf macros (`libtool` / `libltdl-dev`, for
-libffi's `LT_SYS_SYMBOL_USCORE`). Everything else (meson, ninja, autoconf, automake, libtool,
-pkg-config, python3) is already required for libhybris.
+This build needs no host sysroot and no pkg-config: every optional Mesa
+dependency is deliberately invisible (the cross file's `pkg-config` plus
+an exported `PKG_CONFIG_LIBDIR`), so it comes out Vulkan-only and
+WSI-less — a compute driver. `deps/mesa-turnip` is the only Mesa pin
+left, at 26.2.2: Turnip has to be 26.2.2 rather than 25.3.6 because
+25.3.6 SIGSEGVs the container on the q4_K `MUL_MAT` shapes llama.cpp
+emits. See TAWC_DSH_DESIGN.md §11.1.
 
-The build does **not** use the host's `wayland-scanner`. The
-`wayland-scanner` stage builds it from our own pinned libwayland tree
-into `build/xwayland-<abi>/native/`, and `native.ini` (a meson native
-machine file, generated next to `android-cross.ini`) puts that prefix
-ahead of the host pkg-config path so every `native: true` scanner
-lookup resolves there. This is not just tidiness: libwayland's own
-cross build does `dependency('wayland-scanner', native: true, version:
-meson.project_version())`, and meson reads a bare `version:` as `==`,
-so a host wayland package that differs from our pin at all — e.g. host
-1.26.0 vs pinned 1.25.0 — fails the build outright. Bumping the pin to
-chase the host is not a fix; the next host upgrade (or any builder on
-an older distro) breaks it again.
+### andobridge (Rust JNI library → bundled in APK by Gradle)
 
-Bionic-built (NDK), not glibc — see `notes/xwayland.md` "Why bionic"
-for the rationale and the "Glibc alternative" section for the V4
-toolchain swap that we tried and reverted.
-
-### Rust compositor (.so → bundled in APK by Gradle)
-
-NDK clang against bionic, via `cargo-ndk`. Invoked by Gradle
-automatically; no separate command needed.
+The `andobridge` crate is the JNI shell over `ando-broker`
+([ando.md](ando.md)); it is the only Rust library the APK build
+cross-compiles now that the compositor crate is gone. NDK clang against
+bionic, via `cargo-ndk`. Invoked by Gradle automatically
+(`buildAndoBridge<Abi>` + `copyAndoBridge<Abi>`, which stage
+`libandobridge.so` under `jniLibs/`); no separate command needed.
 
 `cargo-ndk` is a cargo subcommand that has to be installed once per
 user (`cargo install cargo-ndk` — also listed in the Host packages
@@ -471,7 +386,7 @@ ndk`.
 
 ```bash
 # Manual invocation (Gradle does this for you):
-cd compositor && \
+cd andobridge && \
     cargo ndk --target arm64-v8a --platform 29 -- build --release
 ```
 
@@ -539,32 +454,28 @@ Builds `arm64-v8a` by default, or `x86_64` when `ANDROID_SERIAL` or
 `.tawctarget` points at an emulator. Use `--abi=arm64-v8a`,
 `--abi=x86_64`, or `--abi=both` to override.
 
-Invokes the Rust compositor build, copies its output into
-`jniLibs/<abi>/`; applies Smithay setup and, when gfxstream is enabled,
-rutabaga setup; cross-builds proot (when enabled) and tawcroot; builds
-the gfxstream host backend for each enabled ABI only when the gfxstream
-backend is enabled; builds/packs Mesa gfxstream-vk and/or Mesa-Zink
-assets when their backends are enabled; builds/packs libhybris for
-arm64; builds/packs Xwayland for arm64 unless `--no-xwayland` is passed;
-then produces
+Invokes the `andobridge` Rust cross-build and copies its output into
+`jniLibs/<abi>/`; cross-builds proot (when the method is enabled),
+tawcroot, and the `ando` client; builds/packs libhybris for arm64; builds
+and packs the Turnip assets for arm64; then produces
 `app/build/outputs/apk/debug/app-debug.apk`.
 Everything the supported install/runtime paths need ships inside this
 APK.
 
 Graphics backend builds are controlled by Gradle's
-`-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`, or by the
-wrapper flags `--no-gfxstream` and `--no-mesa`. Disabling gfxstream
-also disables the compositor crate's kumquat/gfxstream Cargo feature
-and drops `libgfxstream_backend.so`; disabling both gfxstream and
-libhybris-zink skips `scripts/build-mesa-gfxstream.sh` entirely.
-`scripts/build-release-apk.sh` defaults to `libhybris,cpu` so
-production APKs do not ship libhybris-zink or gfxstream/kumquat unless
-`--graphics=...` or `TAWC_RELEASE_GRAPHICS` opts them back in.
+`-PtawcGraphics=libhybris,turnip,none`. The display-only backends
+(`gfxstream`, `libhybris-zink`) are gone with the compositor, so the set
+has no other members — and only two of those three are drivers: `none`
+is the "no driver provisioned" state, not a backend
+([gpu-strategy.md](gpu-strategy.md), "Why `NONE` is not a CPU backend").
+`scripts/build-release-apk.sh` defaults to the same set, so a production
+APK gets the same members (override with `--graphics=...` or
+`TAWC_RELEASE_GRAPHICS`).
 
 `-PtawcAllFilesAccess=false` strips `MANAGE_EXTERNAL_STORAGE` from the
 manifest (build-type overlay `app/src/overlays/no-all-files-access/`)
-for distribution channels that can't carry it; the app hides the
-external-binds UI when the permission is absent. See
+for a build that would rather not ship a broad permission; the app hides
+the external-binds UI when the permission is absent. See
 [external-binds.md](external-binds.md).
 
 ### Third-party license text (checked-in asset)
@@ -581,12 +492,12 @@ require their notices to ship with the binary — this asset is how both
 obligations are met. See [licensing.md](licensing.md).
 
 Regular builds never run it: the output is checked in. Re-run it after
-changing a Gradle dependency, a `deps/` pin, or a compositor crate, and
+changing a Gradle dependency, a `deps/` pin, or a Rust crate, and
 commit the result. Inputs, all read from the working tree:
 
-- `LICENSE` / `LICENSE.MIT` — the GPLv3 text and tawc's own terms
+- `LICENSE` / `LICENSE.MIT` — the GPLv3 text and tawc-dsh's own terms
 - `deps/**/{LICENSE,COPYING}*` — vendored native and Java sources
-- `cargo metadata` for `compositor/`, with per-crate texts read out of
+- `cargo metadata` for the Rust crates, with per-crate texts read out of
   the local `~/.cargo` registry checkout
 - `./gradlew :app:dependencies --configuration releaseRuntimeClasspath`
   for Maven artifacts, mapped to licenses by the `GRADLE_LICENSES`
@@ -615,10 +526,9 @@ generated from it by `scripts/gen-icon.sh`:
 
 | Generated file | Where it shows up |
 |----------------|-------------------|
-| `app/src/main/res/drawable/ic_launcher_foreground.xml` | foreground layer of the adaptive launcher icon (`mipmap-anydpi-v26/ic_launcher.xml`) — the home screen, the app switcher, and pinned Linux-app shortcuts (`EntryShortcuts` falls back to `R.mipmap.ic_launcher`) |
-| `app/src/main/res/drawable/ic_tawc_logo.xml` | the mark at full size, no safe-zone scale; launcher-row fallback icon for graphical entries with no icon of their own (`LauncherActivity`) |
+| `app/src/main/res/drawable/ic_launcher_foreground.xml` | foreground layer of the adaptive launcher icon (`mipmap-anydpi-v26/ic_launcher.xml`) — the home screen and the app switcher |
+| `app/src/main/res/drawable/ic_tawc_logo.xml` | the mark at full size, no safe-zone scale |
 | `app/src/main/res/values/icon_colors.xml` | `tawc_icon_bg`, the adaptive icon's background layer |
-| `fastlane/metadata/android/en-US/images/icon.png` | the F-Droid store listing (512×512) |
 
 `mipmap-anydpi-v26/ic_launcher.xml` is hand-written — it only wires the two
 layers together and has no artwork in it.
@@ -657,27 +567,7 @@ it could not translate rather than quietly dropping it from the icon:
 
 The safe-zone scale (0.60) lives in the script. Android masks the outer
 edge of an adaptive icon away, so the foreground has to sit inside the
-central safe zone; the store PNG uses the same scale so it matches what
-launchers actually draw.
-
-### Store metadata (checked-in assets)
-
-`fastlane/metadata/android/en-US/` holds the F-Droid store listing in the
-standard fastlane layout — F-Droid reads it straight out of the source
-repo, so it ships by being committed, not by being built:
-
-| File                              | Limit  | Notes                                    |
-|-----------------------------------|--------|------------------------------------------|
-| `title.txt`                       | 50     | keep in sync with the `app_name` string  |
-| `short_description.txt`           | 80     | one line, shown in listings              |
-| `full_description.txt`            | 4000   | the listing body                         |
-| `changelogs/<versionCode>.txt`    | 500    | one per release; `1.txt` for `v1`        |
-| `images/icon.png`                 | 512×512| generated, see above                     |
-| `images/phoneScreenshots/*.png`   | —      | ordered by filename                      |
-
-Each release needs a new `changelogs/<versionCode>.txt` — that is the only
-recurring F-Droid chore once the recipe is merged (see
-[release.md](release.md)).
+central safe zone.
 
 ## Install and launch
 
@@ -687,24 +577,16 @@ scripts/app-build-install.sh
 
 Picks the device from `.tawctarget` / `TAWC_TARGET` via
 `scripts/lib/select-device.sh`, builds through `scripts/build-app.sh`,
-installs, force-stops, and launches `MainActivity` (which starts
-`CompositorService`). Flags: `--no-build` to reuse the existing APK;
-`--no-launch` to install without starting (used by
-`run-integration-tests.sh`).
-
-Note: `am start` directly into `.compositor.CompositorActivity` does
-not work — go through `MainActivity` (the script does this).
-
-After reinstalling, the compositor restarts with a new Wayland socket.
-Any running chroot clients (Firefox, etc.) will be connected to the
-old socket and show black screens — kill and relaunch them.
+installs, force-stops, and launches `MainActivity`. Flags: `--no-build`
+to reuse the existing APK; `--no-launch` to install without starting
+(used by `run-integration-tests.sh`).
 
 Installing or upgrading the APK causes the next app start to re-extract
 bundled runtime assets and re-run `TawcInstaller` against existing
 rootfs metadata when the `tawcStamp` changes. Under tawcroot the
-libhybris / gfxstream / Mesa-Zink trees are RO-bound from the extract,
-so they track the APK with no per-rootfs copy; proot/chroot rootfses
-get real-file copies under the same `/usr/lib/...` namespaces via the
+libhybris / Turnip trees are RO-bound from the extract, so they track
+the APK with no per-rootfs copy; proot/chroot rootfses get real-file
+copies under the same `/usr/lib/...` namespaces via the
 provider/manifest mechanism. See notes/installation.md "Copy vs bind".
 
 ## Device setup
@@ -713,40 +595,7 @@ SELinux enforcing mode is supported. `ChrootMounter` applies the needed
 SELinux policy rule (`type_transition magisk tmpfs file appdomain_tmpfs`)
 via `magiskpolicy --live` on every chroot entry.
 
-## Vendored xkb data
-
-The compositor needs xkeyboard-config data for `libxkbcommon` to load
-keymaps. This is **not** built — it's a pure data drop, vendored in
-`app/src/main/assets/xkb/` and extracted to the app's data dir
-(`files/xkb`) by `CompositorService.onCreate` before `nativeStartCompositor`.
-Versioned via `files/xkb/.version`.
-
-The data came from the chroot's `/usr/share/xkeyboard-config-2/`
-(Arch Linux ARM `xkeyboard-config` package). To update:
-
-```bash
-adb shell mkdir -p /data/local/tmp/tawc-dev
-adb shell "su -c 'cd /data/data/me.phie.tawc/distros/arch/rootfs/usr/share/xkeyboard-config-2 && tar cf /data/local/tmp/tawc-dev/xkb-data.tar .'"
-adb pull /data/local/tmp/tawc-dev/xkb-data.tar /tmp/xkb-data.tar
-rm -rf app/src/main/assets/xkb
-mkdir -p app/src/main/assets/xkb
-tar xf /tmp/xkb-data.tar -C app/src/main/assets/xkb/
-rm /tmp/xkb-data.tar
-adb shell "rm /data/local/tmp/tawc-dev/xkb-data.tar"
-```
-
-## Chroot package gotchas
-
-- **Always `pacman -Syu` before installing GTK4 (or anything else recent).**
-  Plain `pacman -S gtk4` installs the current gtk4 package but does **not**
-  upgrade already-installed deps like `glib2`. GTK4 4.22 references
-  `g_get_monotonic_time_ns`, which only exists in `glib2` >= 2.88 — if the
-  chroot still has an older glib2 (e.g. 2.86.4), `gtk4-demo` will fail with
-  `symbol lookup error: /usr/lib/libgtk-4.so.1: undefined symbol:
-  g_get_monotonic_time_ns` on the first lazy PLT resolution. `pacman -Syu`
-  (or `pacman -Sy gtk4` to at least pull a fresh package db) fixes it.
-
-## Debug app & integration tests
+## Integration tests
 
 See [testing.md](testing.md) for full details.
 
@@ -756,9 +605,10 @@ scripts/run-integration-tests.sh           # package setup, deploy, cargo test
 
 ## App unit tests
 
-Host-side JUnit tests for the Kotlin app live in `app/src/test/`
-(currently metadata/JSON parsing — see
-[external-binds.md](external-binds.md)):
+Host-side JUnit tests for the Kotlin app live in `app/src/test/` —
+install metadata/JSON parsing and the `pkgbootstrap` path, the bootstrap
+mirror / HTTP helpers, rootfs cleanup, shell defaults, and the terminal
+session / DSH service plumbing:
 
 ```bash
 ./gradlew :app:testDebugUnitTest

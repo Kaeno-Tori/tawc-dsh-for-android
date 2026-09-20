@@ -9,6 +9,8 @@ import me.phie.tawc.ops.OperationStage
  */
 enum class InstallStage {
     IDLE,
+    /** Measuring candidate mirrors on this network before downloading. */
+    PROBING_MIRROR,
     DOWNLOADING,
     /** PGP-signature / checksum check between download and extract. */
     VERIFYING,
@@ -18,6 +20,12 @@ enum class InstallStage {
     PKG_KEYRING,
     /** Distro-agnostic name for "install the base package set". */
     PKG_INSTALL,
+    /**
+     * Install the Node runtime, npm and DSH itself — the step between
+     * "a distro is on disk" and "the harness can start". Skipped for an
+     * imported pack, which is already provisioned.
+     */
+    PROVISIONING,
     UNMOUNTING,
     DELETING,
     DONE,
@@ -34,6 +42,9 @@ data class InstallProgress(
     val message: String,
     val percent: Int? = null,
     val errorMessage: String? = null,
+    /** See [me.phie.tawc.ops.OperationProgress.steps]. */
+    val steps: List<String> = emptyList(),
+    val currentStep: Int = -1,
 )
 
 internal fun InstallProgress.toOperationProgress(): OperationProgress =
@@ -46,4 +57,6 @@ internal fun InstallProgress.toOperationProgress(): OperationProgress =
         },
         message = message,
         percent = percent,
+        steps = steps,
+        currentStep = currentStep,
     )

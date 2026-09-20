@@ -40,7 +40,7 @@ data class MethodResult(val exitCode: Int, val output: String) {
  *
  * See `notes/installation.md` for the install-pipeline overview and
  * `notes/architecture.md` for where each method fits relative to the
- * compositor / SELinux story.
+ * SELinux story.
  */
 interface InstallationMethod {
     /** Stable id stored in `Installation.method`. */
@@ -97,10 +97,11 @@ interface InstallationMethod {
      * with no args.
      *
      * `graphics` overrides the in-rootfs [GraphicsBackend] for this
-     * one spawn (libhybris / gfxstream / cpu env). `null` falls back
-     * to [me.phie.tawc.Settings.graphicsBackend] (the user's UI
-     * pick). Test harnesses use the override to exercise a specific
-     * backend without flipping the global pref.
+     * one spawn (libhybris / turnip / cpu env). `null` falls back
+     * to [RootfsEnv.defaultBackend], which is derived from the
+     * settings screen's Vulkan pick; the override exists so test
+     * harnesses and the debug broker can exercise a specific backend
+     * without moving that pick.
      *
      * Method-specific notes:
      *   - [ChrootMethod] needs `su` (CAP_SYS_CHROOT). The bind-mount
@@ -125,7 +126,7 @@ interface InstallationMethod {
      * process to exit.
      *
      * `bash -lc` so the distro's /etc/profile + profile.d entries fire
-     * (locale, package PATH additions). The Wayland/GL/X11 env comes
+     * (locale, package PATH additions). The GPU env comes
      * from [RootfsEnv] via the `env -i` wrapper [startInside] puts on
      * the bash invocation.
      */
