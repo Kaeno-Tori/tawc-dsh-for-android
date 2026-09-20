@@ -96,6 +96,15 @@ Vulkan 计算。
 - **一次安装一个容器。** 它不是多发行版管理器；换发行版意味着卸载。
 - **性能优于同类方案，但不是原生** —— 系统调用翻译每次都有开销。
 
+## 报告问题
+
+用 [GitHub Issues](https://github.com/Kaeno-Tori/tawc-dsh-for-android/issues)（有 issue
+模板，会问设备、版本、容器与图形后端 —— 这些是能动手排查的最低信息）。**安全漏洞不要开
+公开 issue**，走 [SECURITY.md](SECURITY.md) 里的私密渠道。
+
+仓库内的 `issues/` 目录是**这个项目自己的开发记录**（agent 之间传递的工作笔记），不是
+反馈入口。
+
 ## 构建
 
 需要 Android SDK/NDK、Rust 工具链和 Linux 主机。完整工具链、vendored 依赖与交叉编译

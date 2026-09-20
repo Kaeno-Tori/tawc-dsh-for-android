@@ -54,6 +54,42 @@ for the one this project uses.
 3. Push `main` and the tag.
 4. `gh release create v0.1 app/build/outputs/apk/release/tawc-dsh-v0.1.apk --title "tawc-dsh v0.1" --notes-file <notes>`.
 
+## Pushing from this checkout
+
+Two traps, both hit for real on the v0.1 release.
+
+**This checkout was a shallow clone, and a shallow clone cannot push its boundary
+commit to an empty repository.** Git treats the boundary's parent as an object the
+receiver already has, so GitHub answers:
+
+```
+remote: fatal: did not receive expected object cf0262b2d843ce4d285ddffc9cc704ee0f315319
+error: remote unpack failed: index-pack failed
+```
+
+Note the sha is the *boundary's parent* (the commit `b3fff97` was cut at), not a
+delta base — which is why `--no-thin` does not help. The fix is to make the local
+repo whole first: `git fetch --unshallow upstream`. Upstream is small (~9 MB, ~785
+commits), so this is cheap. It also updates `upstream/main` to upstream's current
+tip, which may be ahead of the revision this fork branched from — that base is
+recorded in README.md, since it is no longer derivable from where `main` started.
+
+**Then do not `git push --tags`.** That fetch pulls upstream's own tags (`v1`,
+`v2`, `v3`) into the local repo, and `--tags` would publish them alongside this
+project's `v0.1` scheme. Push the release tag by name:
+
+```bash
+git push origin refs/tags/v0.1:refs/tags/v0.1
+```
+
+**HTTP/2 dies mid-transfer on this connection** (`OpenSSL SSL_read: ... unexpected
+eof while reading`, and one attempt failed to connect at all after 133 s). Pass
+HTTP/1.1 inline rather than writing it to config:
+
+```bash
+git -c http.version=HTTP/1.1 push -u origin main
+```
+
 ## Debuggability over size
 
 Release builds are deliberately NOT minified, obfuscated, or stripped (release block + `packaging.jniLibs.keepDebugSymbols` in `app/build.gradle.kts`): user-reported Java stack traces are readable as-is, and native tombstones come out of the device symbolized — no mapping.txt archiving, no unstripped-artifact hunting. This roughly doubles the APK (~29 vs ~13 MB R8-minified); anything under ~50 MB is an acceptable trade. `proguard-rules.pro` stays correct regardless, so minifying is a one-flag change if a size ceiling ever appears.

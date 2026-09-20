@@ -116,6 +116,16 @@ Read these before filing a bug — most of them are deliberate.
 - **Performance beats the alternatives but is not native** — syscall
   translation costs something on every call.
 
+## Reporting problems
+
+Use [GitHub Issues](https://github.com/Kaeno-Tori/tawc-dsh-for-android/issues);
+the bug form asks for the device, version, container and graphics backend,
+which is the least it takes to act on a report. **Security issues go through
+[SECURITY.md](SECURITY.md)**, privately — not the public tracker.
+
+The in-repo `issues/` directory is this project's own working record (notes
+handed between agents), not a feedback channel.
+
 ## Building
 
 Requires the Android SDK/NDK, a Rust toolchain, and a Linux host; see
