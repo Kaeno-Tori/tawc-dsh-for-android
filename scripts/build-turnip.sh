@@ -58,9 +58,18 @@ GUEST_LIB_DIR="/usr/lib/turnip"
 # ICD JSON name the runtime looks for; see TurnipInstallProvider.GUEST_ICD_PATH.
 ICD_NAME="freedreno_icd.json"
 
-# Arch Linux ARM mirror for the loader package — the same one
-# build-rootfs-pack.sh's bootstrap came from. Override for a local mirror.
-ALARM_MIRROR="${TAWC_ALARM_MIRROR:-https://mirrors.ustc.edu.cn/archlinuxarm}"
+# Arch Linux ARM mirrors for the loader package — the same tree
+# build-rootfs-pack.sh's bootstrap came from. Four of them because USTC
+# intermittently answers 403 (reproduced from both a CN and a US host),
+# and a mirror can serve the .db while 403ing the package file it names.
+# Each entry is tried as a whole unit — see the loader block below for why
+# splitting the two across mirrors does not work. Override with your own
+# space-separated list for a local mirror.
+ALARM_MIRRORS="${TAWC_ALARM_MIRRORS:-\
+https://mirrors.ustc.edu.cn/archlinuxarm \
+https://mirrors.aliyun.com/archlinuxarm \
+https://fl.us.mirror.archlinuxarm.org \
+https://ca.us.mirror.archlinuxarm.org}"
 ALARM_ARCH="aarch64"
 # Repo the package lives in, and its name. Verified against the current
 # extra.db: core/community/alarm don't carry it.
@@ -234,53 +243,79 @@ chmod 644 "$ICD_JSON"
 # ── Vulkan loader ──
 # Resolve the package filename out of the mirror's repo database; see the
 # header for why the name isn't hardcoded.
+#
+# Mirrors are tried as whole units: the .db that names the file and the
+# file itself have to come from the same host. Repo databases point at
+# mutable filenames, so a .db from a mirror that is a sync ahead of the
+# one serving the archive names a file that does not exist there yet.
+# `--retry-all-errors` because the 403s these mirrors emit are transient
+# and plain `--retry` does not cover 4xx.
 CACHE_DIR="$REPO_DIR/build/downloads"
 PKG_CACHE="$CACHE_DIR/alarm-$ALARM_ARCH-$ALARM_REPO.db"
 mkdir -p "$CACHE_DIR"
-# Repo databases point at mutable package filenames, so one is re-fetched
-# whenever a loader is actually needed; the package archive itself stays
-# cached (and the whole block is skipped once a loader is staged).
+# The whole block is skipped once a loader is staged; TAWC_REFRESH_ALARM_DB
+# forces a fresh resolve.
 if [ ! -f "$LOADER_SO" ] || [ "${TAWC_REFRESH_ALARM_DB:-0}" = "1" ]; then
-    echo "==> resolving $LOADER_PKG from $ALARM_MIRROR/$ALARM_ARCH/$ALARM_REPO"
-    curl -fsSL --retry 3 -o "$PKG_CACHE" \
-        "$ALARM_MIRROR/$ALARM_ARCH/$ALARM_REPO/$ALARM_REPO.db"
-fi
+    staged=0
+    for mirror in $ALARM_MIRRORS; do
+        base="$mirror/$ALARM_ARCH/$ALARM_REPO"
+        echo "==> resolving $LOADER_PKG from $base"
+        if ! curl -fsSL --retry 3 --retry-all-errors -o "$PKG_CACHE" \
+                "$base/$ALARM_REPO.db"; then
+            echo "    no repo database from this mirror, trying the next" >&2
+            continue
+        fi
 
-if [ ! -f "$LOADER_SO" ]; then
-    DB_EXTRACT="$(mktemp -d)"
-    trap 'rm -rf "$DB_EXTRACT"' EXIT
-    bsdtar -xf "$PKG_CACHE" -C "$DB_EXTRACT"
-    PKG_FILENAME=""
-    PKG_VERSION=""
-    for desc in "$DB_EXTRACT"/*/desc; do
-        [ -f "$desc" ] || continue
-        [ "$(awk '/^%NAME%$/{getline; print; exit}' "$desc")" = "$LOADER_PKG" ] || continue
-        PKG_FILENAME="$(awk '/^%FILENAME%$/{getline; print; exit}' "$desc")"
-        PKG_VERSION="$(awk '/^%VERSION%$/{getline; print; exit}' "$desc")"
+        DB_EXTRACT="$(mktemp -d)"
+        bsdtar -xf "$PKG_CACHE" -C "$DB_EXTRACT"
+        PKG_FILENAME=""
+        PKG_VERSION=""
+        for desc in "$DB_EXTRACT"/*/desc; do
+            [ -f "$desc" ] || continue
+            [ "$(awk '/^%NAME%$/{getline; print; exit}' "$desc")" = "$LOADER_PKG" ] || continue
+            PKG_FILENAME="$(awk '/^%FILENAME%$/{getline; print; exit}' "$desc")"
+            PKG_VERSION="$(awk '/^%VERSION%$/{getline; print; exit}' "$desc")"
+            break
+        done
+        rm -rf "$DB_EXTRACT"
+        if [ -z "$PKG_FILENAME" ]; then
+            echo "    $LOADER_PKG not in this mirror's $ALARM_REPO.db, trying the next" >&2
+            continue
+        fi
+
+        PKG_CACHE_FILE="$CACHE_DIR/$PKG_FILENAME"
+        if [ ! -f "$PKG_CACHE_FILE" ]; then
+            echo "==> downloading $LOADER_PKG $PKG_VERSION"
+            if ! curl -fsSL --retry 3 --retry-all-errors -o "$PKG_CACHE_FILE.part" \
+                    "$base/$PKG_FILENAME"; then
+                rm -f "$PKG_CACHE_FILE.part"
+                echo "    download failed, trying the next" >&2
+                continue
+            fi
+            mv "$PKG_CACHE_FILE.part" "$PKG_CACHE_FILE"
+        fi
+
+        PKG_EXTRACT="$(mktemp -d)"
+        if ! bsdtar -xf "$PKG_CACHE_FILE" -C "$PKG_EXTRACT"; then
+            rm -rf "$PKG_EXTRACT"
+            echo "    unreadable archive, trying the next" >&2
+            continue
+        fi
+        # The package ships libvulkan.so.1 as a symlink to libvulkan.so.1.4.357;
+        # -L so the rootfs gets a real file (a dangling intra-package symlink
+        # would be worse than no loader at all).
+        cp -L "$PKG_EXTRACT/usr/lib/libvulkan.so.1" "$LOADER_SO"
+        rm -rf "$PKG_EXTRACT"
+        chmod 755 "$LOADER_SO"
+        echo "==> loader $PKG_VERSION: $(sha256sum "$LOADER_SO" | cut -c1-16)…"
+        staged=1
         break
     done
-    [ -n "$PKG_FILENAME" ] || {
-        echo "ERROR: $LOADER_PKG not found in $ALARM_REPO.db (mirror layout changed?)" >&2
+    [ "$staged" = "1" ] || {
+        echo "ERROR: no mirror served $LOADER_PKG. Tried:" >&2
+        for mirror in $ALARM_MIRRORS; do echo "         $mirror" >&2; done
         exit 1
     }
-
-    PKG_CACHE_FILE="$CACHE_DIR/$PKG_FILENAME"
-    if [ ! -f "$PKG_CACHE_FILE" ]; then
-        echo "==> downloading $LOADER_PKG $PKG_VERSION"
-        curl -fsSL --retry 3 -o "$PKG_CACHE_FILE.part" \
-            "$ALARM_MIRROR/$ALARM_ARCH/$ALARM_REPO/$PKG_FILENAME"
-        mv "$PKG_CACHE_FILE.part" "$PKG_CACHE_FILE"
-    fi
-
-    PKG_EXTRACT="$(mktemp -d)"
-    trap 'rm -rf "$DB_EXTRACT" "$PKG_EXTRACT"' EXIT
-    bsdtar -xf "$PKG_CACHE_FILE" -C "$PKG_EXTRACT"
-    # The package ships libvulkan.so.1 as a symlink to libvulkan.so.1.4.357;
-    # -L so the rootfs gets a real file (a dangling intra-package symlink
-    # would be worse than no loader at all).
-    cp -L "$PKG_EXTRACT/usr/lib/libvulkan.so.1" "$LOADER_SO"
-    chmod 755 "$LOADER_SO"
-    echo "==> loader $PKG_VERSION: $(sha256sum "$LOADER_SO" | cut -c1-16)…"
 fi
 
 echo "==> staged $INSTALL_DIR"
