@@ -41,6 +41,7 @@ and launch as documented in AGENTS.md's Common Commands.
 | Android SDK + NDK | install Android Studio, or use `sdkmanager` directly. Android platform API 36 is required by `compileSdk`; NDK version pinned in `app/build.gradle.kts` (currently 27.2.12479018). The SDK's `cmdline-tools` (for `apkanalyzer`, used by `scripts/check-no-dev-code.sh` on the release APK) and `build-tools` (zipalign/apksigner/aapt2) are both needed for `scripts/build-release-apk.sh`. | same |
 | Build basics | `base-devel`                                        | `build-essential pkg-config curl libarchive-tools`   |
 | Meson + Ninja (Turnip) | `meson ninja`                            | `meson ninja-build`                                  |
+| `glslangValidator` (Turnip — mesa requires it whenever `with_bvh`, which `-Dvulkan-drivers=freedreno` turns on; Arch gets it via `mesa`'s own deps, so it is easy to have without knowing) | `glslang` | `glslang-tools` |
 | Wayland host tools (libhybris cross-build) | `wayland wayland-protocols` | `libwayland-dev libwayland-egl-backend-dev wayland-protocols` (Arch's `wayland` carries `wayland-egl-backend.h`; Debian splits it out, and libhybris's wayland EGL platform includes it) |
 | Autotools (libhybris cross-build) | `autoconf automake libtool` | `autoconf automake libtool libtool-bin` (Debian ships the `libtool` binary itself in `libtool-bin`, and `build-libhybris.sh` checks for it) |
 | Vulkan headers (libhybris cross-build) | `vulkan-headers`        | `libvulkan-dev`                                      |
@@ -55,7 +56,8 @@ preinstalled:
 
 ```bash
 apt install git openjdk-21-jdk rustup build-essential make pkg-config curl \
-    libarchive-tools file meson ninja-build bison autoconf automake libtool \
+    libarchive-tools file meson ninja-build glslang-tools bison autoconf \
+    automake libtool \
     libtool-bin libltdl-dev perl python3 python3-libxml2 xsltproc libexpat1-dev \
     libwayland-dev libwayland-bin libwayland-egl-backend-dev wayland-protocols \
     libvulkan-dev patchelf libx11-dev libx11-xcb-dev libxcb1-dev \
@@ -69,6 +71,15 @@ and each one fails deep into a cross-build rather than up front:
 `libtool-bin` (Arch folds it into `base-devel`),
 `libwayland-egl-backend-dev` (Arch keeps it inside `wayland`), and the
 `-dev` split for X11/xcb, which Arch does not have at all.
+
+`glslang-tools` fails the same way but for the opposite reason — it was
+simply **absent from this list** until 2026-09-20, when the first CI run
+died with `mesa/build: ERROR: Program 'glslangValidator' not found`.
+mesa requires it on the *host* whenever `with_bvh` is set, and
+`-Dvulkan-drivers=freedreno` sets it. Arch machines tend to have it
+already (it arrives with `glslang`, a `mesa` build dep), which is exactly
+why an Arch-to-Debian transcription misses it and why the "verified in a
+container" claim above only held as far as that container's package set.
 
 That line covers all three graphics members (`libhybris`, `turnip`,
 `none` — the last is the no-driver state, not a backend). `proot` builds

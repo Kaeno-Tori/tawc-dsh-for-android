@@ -73,7 +73,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential make pkg-config curl libarchive-tools file \
-            ninja-build bison autoconf automake libtool libtool-bin \
+            ninja-build glslang-tools bison autoconf automake libtool \
+            libtool-bin \
             libltdl-dev perl python3 python3-pip python3-libxml2 xsltproc \
             libexpat1-dev \
             libwayland-dev libwayland-bin libwayland-egl-backend-dev \
